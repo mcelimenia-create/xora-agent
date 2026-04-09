@@ -5,19 +5,21 @@ import Redis from "ioredis";
 import dotenv from "dotenv";
 import PDFDocument from "pdfkit";
 import OpenAI, { toFile } from "openai";
+import express from "express";
 
 dotenv.config();
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_TOKEN    = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const FROM_EMAIL = process.env.FROM_EMAIL || "XORA <contacto@xoralab.com>";
-const SITE_URL = process.env.SITE_URL || "https://xoralab.com";
-const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID ? parseInt(process.env.ALLOWED_USER_ID) : null;
-const AUTO_FOLLOWUP = process.env.AUTO_FOLLOWUP === "true";
+const BRAVE_API_KEY     = process.env.BRAVE_API_KEY;
+const RESEND_API_KEY    = process.env.RESEND_API_KEY;
+const OPENAI_API_KEY    = process.env.OPENAI_API_KEY;
+const FROM_EMAIL        = process.env.FROM_EMAIL || "XORA <contacto@xoralab.com>";
+const SITE_URL          = process.env.SITE_URL   || "https://xoralab.com";
+const ALLOWED_USER_ID   = process.env.ALLOWED_USER_ID ? parseInt(process.env.ALLOWED_USER_ID) : null;
+const AUTO_FOLLOWUP     = process.env.AUTO_FOLLOWUP === "true";
 const AUTO_FOLLOWUP_DAYS = parseInt(process.env.AUTO_FOLLOWUP_DAYS || "5");
+const PORT              = process.env.PORT || 3000;
 
 if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
   console.error("Faltan TELEGRAM_TOKEN o ANTHROPIC_API_KEY");
@@ -25,14 +27,63 @@ if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
 }
 
 const claude = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-const redis = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
+const bot    = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+const redis  = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-// ── REDIS HELPERS ─────────────────────────────────────────
+// ── REDIS KEYS ────────────────────────────────────────────
 
-const MEMORY_KEY = "xora:memory";
-const CLIENTS_KEY = "xora:clients";
+const MEMORY_KEY        = "xora:memory";
+const CLIENTS_KEY       = "xora:clients";
+const PRICES_KEY        = "xora:prices";
+const TEMPLATES_KEY     = "xora:templates";
+const REMINDERS_KEY     = "xora:reminders";
+const TRACKING_PREFIX   = "xora:track:";
+
+// ── PRICE HELPERS ─────────────────────────────────────────
+
+const DEFAULT_PRICES = {
+  "1_video":        { price: 200, label: "1 vídeo" },
+  "pack3_videos":   { price: 400, label: "Pack 3 vídeos" },
+  "pack5_videos":   { price: 600, label: "Pack 5 vídeos" },
+  "pack3_fotos":    { price: 120, label: "Pack 3 fotos" },
+  "pack5_fotos":    { price: 190, label: "Pack 5 fotos" },
+  "pack8_fotos":    { price: 300, label: "Pack 8 fotos" },
+  "uso_ilimitado":  { price: 250, label: "Uso ilimitado (fijo)" }
+};
+
+async function loadPrices() {
+  if (!redis) return { ...DEFAULT_PRICES };
+  try {
+    const saved = JSON.parse(await redis.get(PRICES_KEY) || "{}");
+    return { ...DEFAULT_PRICES, ...saved };
+  } catch { return { ...DEFAULT_PRICES }; }
+}
+async function savePricesData(data) {
+  if (redis) await redis.set(PRICES_KEY, JSON.stringify(data));
+}
+
+// ── TEMPLATE HELPERS ──────────────────────────────────────
+
+async function loadTemplates() {
+  if (!redis) return {};
+  try { return JSON.parse(await redis.get(TEMPLATES_KEY) || "{}"); } catch { return {}; }
+}
+async function saveTemplatesData(data) {
+  if (redis) await redis.set(TEMPLATES_KEY, JSON.stringify(data));
+}
+
+// ── REMINDER HELPERS ──────────────────────────────────────
+
+async function loadReminders() {
+  if (!redis) return [];
+  try { return JSON.parse(await redis.get(REMINDERS_KEY) || "[]"); } catch { return []; }
+}
+async function saveRemindersData(data) {
+  if (redis) await redis.set(REMINDERS_KEY, JSON.stringify(data));
+}
+
+// ── REDIS HELPERS ─────────────────────────────────────────
 
 async function loadMemory() {
   if (!redis) return {};
@@ -69,7 +120,6 @@ async function getHistory(userId) {
 }
 
 async function persistHistory(userId, messages) {
-  // Convert all messages to string content for storage (skip images/tool blocks)
   const clean = messages
     .map(m => {
       if (typeof m.content === "string") return m;
@@ -89,25 +139,6 @@ async function persistHistory(userId, messages) {
 
 const pendingEmails = new Map();
 
-// ── SECTOR TEMPLATES ──────────────────────────────────────
-
-const SECTOR_TEMPLATES = {
-  gimnasio: `Asunto: Contenido visual para [Nombre] que convierte en ventas
-Cuerpo: Hola [Nombre], vi que [Gimnasio] tiene una gran comunidad pero el contenido visual puede ser lo que marque la diferencia para captar nuevos socios. En XORA creamos vídeos y fotos con IA de alta calidad — desde entrenamientos hasta ambiente de sala — a una fracción del coste de una producción tradicional. ¿Te gustaría ver ejemplos de lo que hacemos para gimnasios?`,
-
-  moda: `Asunto: Fotos y vídeos de producto para [Marca] sin sesión fotográfica
-Cuerpo: Hola [Nombre], el contenido de [Marca] tiene potencial pero las sesiones fotográficas tradicionales son caras y lentas. En XORA generamos fotos y vídeos de producto con IA de calidad editorial, con nuestro modelo virtual Enzo especializado en moda masculina. Entrega en 48h. ¿Te mando algunos ejemplos?`,
-
-  restaurante: `Asunto: Contenido que hace que tu restaurante llene mesas
-Cuerpo: Hola [Nombre], vi [Restaurante] y creo que con el contenido visual adecuado podríais llenar muchas más mesas. En XORA creamos fotos y vídeos de platos, ambiente y experiencia con IA — el tipo de contenido que funciona en Instagram y Google. Sin sesiones largas ni costes de producción. ¿Hablamos?`,
-
-  ecommerce: `Asunto: Fotos de producto profesionales para [Tienda] en 48h
-Cuerpo: Hola [Nombre], las fotos de producto son lo que más impacta en la conversión de una tienda online. En XORA las generamos con IA a nivel de estudio fotográfico — fondos limpios, lifestyle, diferentes ángulos — todo en 48h y sin necesidad de sesión física. ¿Te interesa ver ejemplos con productos similares a los tuyos?`,
-
-  default: `Asunto: Contenido visual con IA para [Empresa]
-Cuerpo: Hola [Nombre], me llamo Marcos y soy el fundador de XORA, una agencia de contenido visual con IA. Creamos fotos y vídeos de calidad profesional para marcas como la tuya, sin los costes de una producción tradicional. ¿Te gustaría ver ejemplos de nuestro trabajo?`
-};
-
 // ── SYSTEM PROMPT ─────────────────────────────────────────
 
 const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, una agencia de contenido con IA especializada en creación de fotos y vídeos para marcas.
@@ -115,45 +146,45 @@ const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, u
 ## Sobre XORA
 - Crea contenido visual (fotos y vídeos) con IA de calidad profesional.
 - Tienen a Enzo, su influencer IA masculino, para lifestyle, moda y producto.
-- Transforman imágenes existentes del cliente elevándolas con IA.
 - Email: contacto@xoralab.com | Web: ${SITE_URL}
 
-## Tarifas
-- 1 vídeo: desde 200€ | Pack 3: desde 400€ | Pack 5: desde 600€
-- Pack 3 fotos: 120€ | Pack 5: 190€ | Pack 8: 300€
-- Extras: derechos anuncios +30-50%, raw +50%, uso ilimitado 250€ fijo
+## Precios (usa get_prices para ver los actuales, update_price para modificar)
+Los precios son dinámicos y pueden cambiar. Consulta siempre get_prices antes de calcular o presupuestar.
+Para calcular presupuestos usa la herramienta calculate_budget.
 
-## Plantillas por sector
-- gimnasio, moda, restaurante, ecommerce, default
-Úsalas cuando redactes emails adaptando [Nombre] y [Empresa] al negocio real.
+## Plantillas de email
+Usa get_templates para ver plantillas guardadas. Usa save_template para guardar nuevas.
+Sectores base: gimnasio, moda, restaurante, ecommerce, default.
 
-## CRM de clientes
-Usa save_client para guardar cada negocio que contactes o que muestre interés.
-Estados posibles: "contactado", "interesado", "negociando", "cliente", "descartado"
-Actualiza el estado con update_client cuando Marcos te informe de cambios.
+## CRM
+- Estados: "contactado", "interesado", "negociando", "cliente", "descartado"
+- Cuando el estado pase a "cliente", se enviará un email de bienvenida automáticamente.
+- Usa save_client / update_client / get_clients para gestionar.
 
-## Búsqueda de emails
-Usa search_email para encontrar el email de contacto de un negocio específico antes de preparar el email.
+## Recordatorios
+- Usa set_reminder para crear recordatorios con fecha concreta.
+- Convierte siempre fechas relativas (mañana, el jueves, en 3 días) a formato ISO YYYY-MM-DD.
 
-## Generación de contenido para redes sociales
-Cuando Marcos pida contenido, genera directamente:
-- Post Instagram: gancho potente (1 línea) + cuerpo (3-4 líneas) + CTA + 5 hashtags relevantes
-- Guión Reel: intro gancho (3s) + desarrollo escena a escena con texto en pantalla + voz en off + CTA final
-- Stories: secuencia de 3-5 slides, texto corto e impactante por slide
-- Copy publicitario: headline + descripción + CTA optimizado para conversión
-Adapta siempre el tono al sector y a la marca del cliente.
+## Contenido para redes sociales
+Genera directamente sin herramientas:
+- Post Instagram: gancho + cuerpo (3-4 líneas) + CTA + 5 hashtags
+- Guión Reel: intro gancho (3s) + escenas con texto en pantalla + voz en off + CTA
+- Stories: 3-5 slides, texto corto e impactante
+- Copy publicitario: headline + descripción + CTA
+- Calendario editorial: tabla por semanas con fecha, formato, tema y caption
 
-## Análisis de imágenes
-Cuando Marcos mande una foto, analiza: qué negocio es, qué tipo de contenido visual podría necesitar, cómo contactarles y qué propuesta hacerles desde XORA.
+## Análisis de competencia
+Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
 
 ## Herramientas disponibles
-- search_web: busca información general
-- search_businesses: búsqueda masiva de 10 negocios potenciales
-- search_email: busca el email de contacto de un negocio específico
-- prepare_email: prepara email pendiente de confirmación (puede incluir PDF)
-- save_client / update_client / get_clients: gestión CRM
-- generate_proposal: genera propuesta comercial completa
-- save_memory / get_memory: memoria permanente
+- search_web, search_businesses, search_email
+- prepare_email, save_client, update_client, get_clients
+- generate_proposal
+- update_price, get_prices
+- save_template, get_templates
+- set_reminder
+- calculate_budget
+- save_memory, get_memory
 
 Responde siempre en español, de forma clara y directa.`;
 
@@ -163,49 +194,45 @@ const TOOLS = [
   {
     name: "search_web",
     description: "Busca información general en internet.",
-    input_schema: {
-      type: "object",
-      properties: { query: { type: "string" } },
-      required: ["query"]
-    }
+    input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
   },
   {
     name: "search_businesses",
-    description: "Búsqueda masiva de negocios potenciales. Devuelve hasta 10 resultados.",
+    description: "Búsqueda masiva de 10 negocios potenciales.",
     input_schema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "ej: 'gimnasios Madrid email contacto'" },
-        sector: { type: "string", description: "gimnasio, moda, restaurante, ecommerce u otro" }
+        query:  { type: "string" },
+        sector: { type: "string" }
       },
       required: ["query", "sector"]
     }
   },
   {
     name: "search_email",
-    description: "Busca el email de contacto de un negocio específico.",
+    description: "Busca el email de contacto de un negocio.",
     input_schema: {
       type: "object",
       properties: {
         business_name: { type: "string" },
-        website: { type: "string", description: "Web del negocio si se conoce" },
-        location: { type: "string" }
+        website:       { type: "string" },
+        location:      { type: "string" }
       },
       required: ["business_name"]
     }
   },
   {
     name: "prepare_email",
-    description: "Prepara email de presentación pendiente de confirmación.",
+    description: "Prepara email pendiente de confirmación.",
     input_schema: {
       type: "object",
       properties: {
-        to: { type: "string" },
-        business_name: { type: "string" },
-        subject: { type: "string" },
-        body: { type: "string", description: "Máx 150 palabras, personalizado al negocio" },
-        sector: { type: "string" },
-        attach_proposal: { type: "boolean", description: "Si adjuntar propuesta PDF al email" }
+        to:              { type: "string" },
+        business_name:   { type: "string" },
+        subject:         { type: "string" },
+        body:            { type: "string" },
+        sector:          { type: "string" },
+        attach_proposal: { type: "boolean" }
       },
       required: ["to", "business_name", "subject", "body"]
     }
@@ -216,51 +243,122 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        name: { type: "string" },
-        email: { type: "string" },
+        name:   { type: "string" },
+        email:  { type: "string" },
         sector: { type: "string" },
         status: { type: "string", description: "contactado | interesado | negociando | cliente | descartado" },
-        notes: { type: "string" }
+        notes:  { type: "string" }
       },
       required: ["name", "status"]
     }
   },
   {
     name: "update_client",
-    description: "Actualiza el estado o notas de un cliente existente.",
+    description: "Actualiza estado o notas de un cliente. Si el nuevo estado es 'cliente', se enviará email de bienvenida automáticamente.",
     input_schema: {
       type: "object",
       properties: {
-        name: { type: "string" },
+        name:   { type: "string" },
         status: { type: "string" },
-        notes: { type: "string" }
+        notes:  { type: "string" }
       },
       required: ["name"]
     }
   },
   {
     name: "get_clients",
-    description: "Obtiene todos los clientes y prospectos del CRM.",
+    description: "Obtiene todos los clientes del CRM.",
     input_schema: {
       type: "object",
       properties: {
-        status_filter: { type: "string", description: "Filtrar por estado (opcional)" }
+        status_filter: { type: "string" }
       },
       required: []
     }
   },
   {
     name: "generate_proposal",
-    description: "Genera una propuesta comercial completa para un cliente.",
+    description: "Genera propuesta comercial completa.",
     input_schema: {
       type: "object",
       properties: {
         client_name: { type: "string" },
-        sector: { type: "string" },
-        services: { type: "string", description: "Servicios específicos que necesita" },
-        budget: { type: "string", description: "Presupuesto aproximado si se conoce" }
+        sector:      { type: "string" },
+        services:    { type: "string" },
+        budget:      { type: "string" }
       },
       required: ["client_name", "sector", "services"]
+    }
+  },
+  {
+    name: "update_price",
+    description: "Actualiza el precio de un servicio.",
+    input_schema: {
+      type: "object",
+      properties: {
+        service_key: { type: "string", description: "ej: 1_video, pack3_videos, pack3_fotos, uso_ilimitado" },
+        price:       { type: "number", description: "Nuevo precio en euros" },
+        label:       { type: "string", description: "Nombre descriptivo del servicio" }
+      },
+      required: ["service_key", "price"]
+    }
+  },
+  {
+    name: "get_prices",
+    description: "Obtiene la tabla de precios actualizada.",
+    input_schema: { type: "object", properties: {}, required: [] }
+  },
+  {
+    name: "save_template",
+    description: "Guarda una plantilla de email personalizada.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name:    { type: "string", description: "Nombre de la plantilla" },
+        sector:  { type: "string" },
+        subject: { type: "string" },
+        body:    { type: "string" }
+      },
+      required: ["name", "subject", "body"]
+    }
+  },
+  {
+    name: "get_templates",
+    description: "Obtiene las plantillas de email guardadas.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sector: { type: "string", description: "Filtrar por sector (opcional)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "set_reminder",
+    description: "Crea un recordatorio para una fecha concreta.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text:    { type: "string", description: "Qué recordar" },
+        date:    { type: "string", description: "Fecha en formato YYYY-MM-DD" },
+        time:    { type: "string", description: "Hora en formato HH:MM (opcional, por defecto 09:00)" }
+      },
+      required: ["text", "date"]
+    }
+  },
+  {
+    name: "calculate_budget",
+    description: "Calcula el presupuesto exacto según servicios seleccionados.",
+    input_schema: {
+      type: "object",
+      properties: {
+        videos:           { type: "number", description: "Número de vídeos (0, 1, 3 o 5)" },
+        photos:           { type: "number", description: "Número de fotos (0, 3, 5 u 8)" },
+        ad_rights:        { type: "boolean", description: "Incluir derechos de anuncios (+30-50%)" },
+        unlimited_rights: { type: "boolean", description: "Incluir uso ilimitado (+250€ fijo)" },
+        raw_files:        { type: "boolean", description: "Incluir archivos RAW (+50%)" }
+      },
+      required: ["videos", "photos"]
     }
   },
   {
@@ -269,7 +367,7 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        key: { type: "string" },
+        key:   { type: "string" },
         value: { type: "string" }
       },
       required: ["key", "value"]
@@ -308,30 +406,45 @@ async function searchEmail(input) {
 
 function prepareEmail(userId, input) {
   pendingEmails.set(userId, {
-    to: input.to,
-    business_name: input.business_name,
-    subject: input.subject,
-    body: input.body,
-    sector: input.sector || "default",
+    to:              input.to,
+    business_name:   input.business_name,
+    subject:         input.subject,
+    body:            input.body,
+    sector:          input.sector || "default",
     attach_proposal: input.attach_proposal || false
   });
-  return `Email preparado para ${input.business_name}${input.attach_proposal ? " (con propuesta PDF adjunta)" : ""}. Pendiente de confirmación.`;
+  return `Email preparado para ${input.business_name}${input.attach_proposal ? " (con propuesta PDF adjunta)" : ""}. Usa /enviar para mandar o /cancelar para descartar.`;
 }
 
 async function saveClient(input) {
   const clients = await loadClients();
   const id = input.name.toLowerCase().replace(/\s+/g, "_");
+  const prevStatus = clients[id]?.status;
   clients[id] = {
-    name: input.name,
-    email: input.email || "",
-    sector: input.sector || "",
-    status: input.status,
-    notes: input.notes || "",
-    created_at: clients[id]?.created_at || new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    contacted_at: input.status === "contactado" ? new Date().toISOString() : (clients[id]?.contacted_at || "")
+    name:         input.name,
+    email:        input.email  || clients[id]?.email  || "",
+    sector:       input.sector || clients[id]?.sector || "",
+    status:       input.status,
+    notes:        input.notes  || clients[id]?.notes  || "",
+    created_at:   clients[id]?.created_at   || new Date().toISOString(),
+    updated_at:   new Date().toISOString(),
+    contacted_at: input.status === "contactado"
+      ? (clients[id]?.contacted_at || new Date().toISOString())
+      : (clients[id]?.contacted_at || ""),
+    closed_at:    input.status === "cliente"
+      ? (clients[id]?.closed_at || new Date().toISOString())
+      : (clients[id]?.closed_at || ""),
+    onboarding_sent: clients[id]?.onboarding_sent || false
   };
   await saveClients(clients);
+
+  // Auto-onboarding when becoming a client
+  if (input.status === "cliente" && prevStatus !== "cliente" && !clients[id].onboarding_sent && clients[id].email) {
+    await sendOnboardingEmail(clients[id]);
+    clients[id].onboarding_sent = true;
+    await saveClients(clients);
+  }
+
   return `Cliente "${input.name}" guardado con estado "${input.status}".`;
 }
 
@@ -339,10 +452,27 @@ async function updateClient(input) {
   const clients = await loadClients();
   const id = input.name.toLowerCase().replace(/\s+/g, "_");
   if (!clients[id]) return `No encontré cliente con nombre "${input.name}".`;
-  if (input.status) clients[id].status = input.status;
-  if (input.notes) clients[id].notes = (clients[id].notes ? clients[id].notes + "\n" : "") + `[${new Date().toLocaleDateString("es-ES")}] ${input.notes}`;
+  const prevStatus = clients[id].status;
+  if (input.status) {
+    clients[id].status = input.status;
+    if (input.status === "cliente" && !clients[id].closed_at) {
+      clients[id].closed_at = new Date().toISOString();
+    }
+  }
+  if (input.notes) {
+    clients[id].notes = (clients[id].notes ? clients[id].notes + "\n" : "") +
+      `[${new Date().toLocaleDateString("es-ES")}] ${input.notes}`;
+  }
   clients[id].updated_at = new Date().toISOString();
   await saveClients(clients);
+
+  // Auto-onboarding when status changes to cliente
+  if (input.status === "cliente" && prevStatus !== "cliente" && !clients[id].onboarding_sent && clients[id].email) {
+    await sendOnboardingEmail(clients[id]);
+    clients[id].onboarding_sent = true;
+    await saveClients(clients);
+  }
+
   return `Cliente "${input.name}" actualizado.`;
 }
 
@@ -376,14 +506,11 @@ INVERSIÓN ESTIMADA:
 ${input.budget || "A definir según alcance final"}
 
 PROCESO:
-1. Brief — nos cuentas qué necesitas (1 día)
-2. Producción con IA (2-5 días)
-3. Revisión hasta tu aprobación
-4. Entrega de archivos finales
+1. Brief (1 día) → 2. Producción con IA (2-5 días) → 3. Revisión → 4. Entrega
 
 GARANTÍAS:
-✓ Revisiones incluidas hasta tu aprobación
-✓ Derechos de uso según paquete elegido
+✓ Revisiones hasta tu aprobación
+✓ Derechos de uso según paquete
 ✓ Entrega en los plazos acordados
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -391,75 +518,113 @@ Marcos — Fundador de XORA
 contacto@xoralab.com | ${SITE_URL}`;
 }
 
-// ── PDF GENERATOR ─────────────────────────────────────────
+async function toolUpdatePrice(input) {
+  const prices = await loadPrices();
+  prices[input.service_key] = {
+    price: input.price,
+    label: input.label || prices[input.service_key]?.label || input.service_key
+  };
+  await savePricesData(prices);
+  return `Precio actualizado: ${prices[input.service_key].label} → ${input.price}€`;
+}
 
-async function generateProposalPDF(input) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 60, size: "A4" });
-    const buffers = [];
+async function toolGetPrices() {
+  const prices = await loadPrices();
+  return "TARIFAS XORA:\n" + Object.entries(prices)
+    .map(([k, v]) => `• ${v.label}: ${v.price}€`)
+    .join("\n");
+}
 
-    doc.on("data", buf => buffers.push(buf));
-    doc.on("end", () => resolve(Buffer.concat(buffers)));
-    doc.on("error", reject);
+async function toolSaveTemplate(input) {
+  const templates = await loadTemplates();
+  const id = input.name.toLowerCase().replace(/\s+/g, "_");
+  templates[id] = {
+    name:    input.name,
+    sector:  input.sector || "default",
+    subject: input.subject,
+    body:    input.body,
+    created_at: new Date().toISOString()
+  };
+  await saveTemplatesData(templates);
+  return `Plantilla "${input.name}" guardada.`;
+}
 
-    // Header
-    doc.rect(0, 0, 595, 110).fill("#030d1a");
-    doc.fillColor("#ffffff").fontSize(30).font("Helvetica-Bold").text("XORA", 60, 35);
-    doc.fontSize(11).font("Helvetica").text("Agencia de Contenido con IA", 60, 72);
-    doc.fillColor("#1a1a1a");
+async function toolGetTemplates(sectorFilter) {
+  const templates = await loadTemplates();
+  const list = Object.values(templates);
+  if (!list.length) return "No hay plantillas guardadas aún.";
+  const filtered = sectorFilter ? list.filter(t => t.sector === sectorFilter) : list;
+  if (!filtered.length) return `No hay plantillas para sector "${sectorFilter}".`;
+  return filtered.map(t =>
+    `📝 *${t.name}* [${t.sector}]\nAsunto: ${t.subject}\n${t.body.slice(0, 120)}...`
+  ).join("\n\n");
+}
 
-    doc.moveDown(4);
-
-    // Title
-    doc.fontSize(20).font("Helvetica-Bold").text(`Propuesta para ${input.client_name}`);
-    doc.fontSize(11).font("Helvetica").fillColor("#666666")
-      .text(`Sector: ${input.sector}  ·  Fecha: ${new Date().toLocaleDateString("es-ES")}`);
-    doc.fillColor("#1a1a1a").moveDown(0.8);
-
-    doc.moveTo(60, doc.y).lineTo(535, doc.y).strokeColor("#e0e0e0").stroke();
-    doc.moveDown(0.8);
-
-    // Services
-    doc.fontSize(13).font("Helvetica-Bold").text("Servicios propuestos");
-    doc.moveDown(0.4);
-    doc.fontSize(11).font("Helvetica").text(input.services, { lineGap: 5 });
-    doc.moveDown(0.8);
-
-    // Budget
-    doc.fontSize(13).font("Helvetica-Bold").text("Inversión estimada");
-    doc.moveDown(0.4);
-    doc.fontSize(11).font("Helvetica").text(input.budget || "A definir según alcance final");
-    doc.moveDown(0.8);
-
-    // Process
-    doc.fontSize(13).font("Helvetica-Bold").text("Proceso de trabajo");
-    doc.moveDown(0.4);
-    ["1. Brief — nos cuentas qué necesitas (1 día)",
-      "2. Producción con IA (2-5 días)",
-      "3. Revisión hasta tu aprobación",
-      "4. Entrega de archivos finales"].forEach(step => {
-      doc.fontSize(11).font("Helvetica").text(step, { lineGap: 4 });
-    });
-    doc.moveDown(0.8);
-
-    // Guarantees
-    doc.fontSize(13).font("Helvetica-Bold").text("Garantías");
-    doc.moveDown(0.4);
-    ["✓ Revisiones incluidas hasta tu aprobación",
-      "✓ Derechos de uso según paquete elegido",
-      "✓ Entrega en los plazos acordados"].forEach(g => {
-      doc.fontSize(11).font("Helvetica").text(g, { lineGap: 4 });
-    });
-
-    // Footer
-    doc.moveDown(3);
-    doc.moveTo(60, doc.y).lineTo(535, doc.y).strokeColor("#e0e0e0").stroke();
-    doc.moveDown(0.6);
-    doc.fontSize(10).fillColor("#666666")
-      .text(`Marcos — Fundador de XORA  ·  contacto@xoralab.com  ·  ${SITE_URL}`, { align: "center" });
-
-    doc.end();
+async function toolSetReminder(input) {
+  const reminders = await loadReminders();
+  const datetime = `${input.date}T${input.time || "09:00"}:00`;
+  reminders.push({
+    id:      Date.now(),
+    text:    input.text,
+    date:    input.date,
+    time:    input.time || "09:00",
+    datetime,
+    done:    false,
+    userId:  ALLOWED_USER_ID
   });
+  await saveRemindersData(reminders);
+  return `Recordatorio guardado: "${input.text}" para el ${new Date(datetime).toLocaleDateString("es-ES")} a las ${input.time || "09:00"}`;
+}
+
+async function toolCalculateBudget(input) {
+  const prices = await loadPrices();
+  let base = 0;
+  let lines = [];
+
+  // Videos
+  if (input.videos === 1) {
+    base += prices["1_video"]?.price || 200;
+    lines.push(`1 vídeo: ${prices["1_video"]?.price || 200}€`);
+  } else if (input.videos === 3) {
+    base += prices["pack3_videos"]?.price || 400;
+    lines.push(`Pack 3 vídeos: ${prices["pack3_videos"]?.price || 400}€`);
+  } else if (input.videos >= 5) {
+    base += prices["pack5_videos"]?.price || 600;
+    lines.push(`Pack 5 vídeos: ${prices["pack5_videos"]?.price || 600}€`);
+  }
+
+  // Photos
+  if (input.photos === 3) {
+    base += prices["pack3_fotos"]?.price || 120;
+    lines.push(`Pack 3 fotos: ${prices["pack3_fotos"]?.price || 120}€`);
+  } else if (input.photos === 5) {
+    base += prices["pack5_fotos"]?.price || 190;
+    lines.push(`Pack 5 fotos: ${prices["pack5_fotos"]?.price || 190}€`);
+  } else if (input.photos >= 8) {
+    base += prices["pack8_fotos"]?.price || 300;
+    lines.push(`Pack 8 fotos: ${prices["pack8_fotos"]?.price || 300}€`);
+  }
+
+  let extras = 0;
+
+  if (input.ad_rights) {
+    const adExtra = Math.round(base * 0.4);
+    extras += adExtra;
+    lines.push(`Derechos de anuncios (+40%): +${adExtra}€`);
+  }
+  if (input.raw_files) {
+    const rawExtra = Math.round(base * 0.5);
+    extras += rawExtra;
+    lines.push(`Archivos RAW (+50%): +${rawExtra}€`);
+  }
+  if (input.unlimited_rights) {
+    const unlimitedExtra = prices["uso_ilimitado"]?.price || 250;
+    extras += unlimitedExtra;
+    lines.push(`Uso ilimitado: +${unlimitedExtra}€`);
+  }
+
+  const total = base + extras;
+  return `PRESUPUESTO XORA:\n${lines.join("\n")}\n───────────────\nTOTAL: ${total}€`;
 }
 
 // ── RUN TOOL ──────────────────────────────────────────────
@@ -474,6 +639,12 @@ async function runTool(name, input, userId) {
     case "update_client":     return await updateClient(input);
     case "get_clients":       return await getClients(input.status_filter);
     case "generate_proposal": return generateProposalText(input);
+    case "update_price":      return await toolUpdatePrice(input);
+    case "get_prices":        return await toolGetPrices();
+    case "save_template":     return await toolSaveTemplate(input);
+    case "get_templates":     return await toolGetTemplates(input.sector);
+    case "set_reminder":      return await toolSetReminder(input);
+    case "calculate_budget":  return await toolCalculateBudget(input);
     case "save_memory": {
       const memory = await loadMemory();
       const existing = memory[input.key] ? memory[input.key] + "\n" : "";
@@ -568,8 +739,83 @@ async function sendEmail({ to, subject, body, pdfBuffer, pdfFilename }) {
       content: pdfBuffer
     }];
   }
-  const { error } = await resend.emails.send(emailData);
+  const { data, error } = await resend.emails.send(emailData);
   if (error) throw new Error(error.message);
+  return data?.id;
+}
+
+// ── ONBOARDING EMAIL ──────────────────────────────────────
+
+async function sendOnboardingEmail(client) {
+  try {
+    const body = `Hola ${client.name},\n\nBienvenido a XORA. Nos alegra tenerte a bordo.\n\nA partir de ahora así es como trabajamos:\n\n1. Brief — cuéntanos qué necesitas, tu estilo y referencias (1 día)\n2. Producción — generamos el contenido con IA (2-5 días)\n3. Revisión — ajustes hasta que estés 100% satisfecho\n4. Entrega — archivos optimizados listos para publicar\n\nPara arrancar, responde a este email con:\n• Qué tipo de contenido necesitas primero\n• Tu web o Instagram para ver tu estilo actual\n• Cualquier referencia visual que te guste\n\nEstamos aquí para cualquier duda.\n\nUn saludo,\nMarcos\nFundador de XORA`;
+    await sendEmail({ to: client.email, subject: `Bienvenido a XORA, ${client.name}`, body });
+    if (ALLOWED_USER_ID) {
+      await bot.sendMessage(ALLOWED_USER_ID, `🎉 Email de bienvenida enviado a *${client.name}* (${client.email})`, { parse_mode: "Markdown" });
+    }
+  } catch (err) {
+    console.error("Error onboarding email:", err.message);
+  }
+}
+
+// ── PDF GENERATOR ─────────────────────────────────────────
+
+async function generateProposalPDF(input) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 60, size: "A4" });
+    const buffers = [];
+    doc.on("data", buf => buffers.push(buf));
+    doc.on("end", () => resolve(Buffer.concat(buffers)));
+    doc.on("error", reject);
+
+    doc.rect(0, 0, 595, 110).fill("#030d1a");
+    doc.fillColor("#ffffff").fontSize(30).font("Helvetica-Bold").text("XORA", 60, 35);
+    doc.fontSize(11).font("Helvetica").text("Agencia de Contenido con IA", 60, 72);
+    doc.fillColor("#1a1a1a").moveDown(4);
+
+    doc.fontSize(20).font("Helvetica-Bold").text(`Propuesta para ${input.client_name}`);
+    doc.fontSize(11).font("Helvetica").fillColor("#666666")
+      .text(`Sector: ${input.sector}  ·  Fecha: ${new Date().toLocaleDateString("es-ES")}`);
+    doc.fillColor("#1a1a1a").moveDown(0.8);
+    doc.moveTo(60, doc.y).lineTo(535, doc.y).strokeColor("#e0e0e0").stroke();
+    doc.moveDown(0.8);
+
+    doc.fontSize(13).font("Helvetica-Bold").text("Servicios propuestos");
+    doc.moveDown(0.4);
+    doc.fontSize(11).font("Helvetica").text(input.services, { lineGap: 5 });
+    doc.moveDown(0.8);
+
+    doc.fontSize(13).font("Helvetica-Bold").text("Inversión estimada");
+    doc.moveDown(0.4);
+    doc.fontSize(11).font("Helvetica").text(input.budget || "A definir según alcance final");
+    doc.moveDown(0.8);
+
+    doc.fontSize(13).font("Helvetica-Bold").text("Proceso de trabajo");
+    doc.moveDown(0.4);
+    ["1. Brief — nos cuentas qué necesitas (1 día)",
+     "2. Producción con IA (2-5 días)",
+     "3. Revisión hasta tu aprobación",
+     "4. Entrega de archivos finales"].forEach(step => {
+      doc.fontSize(11).font("Helvetica").text(step, { lineGap: 4 });
+    });
+    doc.moveDown(0.8);
+
+    doc.fontSize(13).font("Helvetica-Bold").text("Garantías");
+    doc.moveDown(0.4);
+    ["✓ Revisiones incluidas hasta tu aprobación",
+     "✓ Derechos de uso según paquete elegido",
+     "✓ Entrega en los plazos acordados"].forEach(g => {
+      doc.fontSize(11).font("Helvetica").text(g, { lineGap: 4 });
+    });
+
+    doc.moveDown(3);
+    doc.moveTo(60, doc.y).lineTo(535, doc.y).strokeColor("#e0e0e0").stroke();
+    doc.moveDown(0.6);
+    doc.fontSize(10).fillColor("#666666")
+      .text(`Marcos — Fundador de XORA  ·  contacto@xoralab.com  ·  ${SITE_URL}`, { align: "center" });
+
+    doc.end();
+  });
 }
 
 // ── VOICE TRANSCRIPTION ───────────────────────────────────
@@ -581,9 +827,7 @@ async function transcribeVoice(fileUrl) {
     const buffer = Buffer.from(await res.arrayBuffer());
     const audioFile = await toFile(buffer, "audio.ogg", { type: "audio/ogg" });
     const transcription = await openai.audio.transcriptions.create({
-      file: audioFile,
-      model: "whisper-1",
-      language: "es"
+      file: audioFile, model: "whisper-1", language: "es"
     });
     return transcription.text;
   } catch (err) {
@@ -592,7 +836,7 @@ async function transcribeVoice(fileUrl) {
   }
 }
 
-// ── FOLLOW-UP SCHEDULER ───────────────────────────────────
+// ── SCHEDULERS ────────────────────────────────────────────
 
 async function checkFollowUps() {
   if (!ALLOWED_USER_ID) return;
@@ -608,7 +852,6 @@ async function checkFollowUps() {
     if (!pending.length) return;
 
     if (AUTO_FOLLOWUP) {
-      // Auto-enviar emails de seguimiento
       for (const client of pending) {
         if (!client.email) continue;
         try {
@@ -625,9 +868,9 @@ async function checkFollowUps() {
       const msg = `⏰ *Seguimientos pendientes* (${pending.length})\n\n` +
         pending.map(c => {
           const days = Math.floor((now - new Date(c.contacted_at)) / 86400000);
-          return `• *${c.name}* — hace ${days} días sin respuesta\n  ${c.email || "sin email"}`;
+          return `• *${c.name}* — hace ${days} días\n  ${c.email || "sin email"}`;
         }).join("\n\n") +
-        "\n\n¿Quieres que redacte un email de seguimiento para alguno?";
+        "\n\n¿Quieres que redacte un email de seguimiento?";
       await bot.sendMessage(ALLOWED_USER_ID, msg, { parse_mode: "Markdown" });
     }
   } catch (err) {
@@ -635,7 +878,63 @@ async function checkFollowUps() {
   }
 }
 
+async function checkReminders() {
+  if (!ALLOWED_USER_ID) return;
+  try {
+    const reminders = await loadReminders();
+    const now = new Date();
+    let changed = false;
+    for (const r of reminders) {
+      if (r.done) continue;
+      const reminderDate = new Date(r.datetime);
+      if (reminderDate <= now) {
+        await bot.sendMessage(ALLOWED_USER_ID,
+          `🔔 *Recordatorio*\n\n${r.text}`,
+          { parse_mode: "Markdown" }
+        );
+        r.done = true;
+        changed = true;
+      }
+    }
+    if (changed) await saveRemindersData(reminders);
+  } catch (err) {
+    console.error("Error en recordatorios:", err.message);
+  }
+}
+
 setInterval(checkFollowUps, 24 * 60 * 60 * 1000);
+setInterval(checkReminders, 60 * 1000); // cada minuto
+
+// ── WEBHOOK SERVER (email opens) ──────────────────────────
+
+const app = express();
+app.use(express.json());
+
+app.post("/webhook/resend", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const { type, data } = req.body;
+    if (type === "email.opened" && ALLOWED_USER_ID) {
+      // Look up tracking info
+      let info = null;
+      if (redis) {
+        const raw = await redis.get(`${TRACKING_PREFIX}${data.email_id}`);
+        if (raw) info = JSON.parse(raw);
+      }
+      const label = info ? `*${info.business_name}* (${info.to})` : `ID: ${data.email_id}`;
+      await bot.sendMessage(ALLOWED_USER_ID,
+        `👁️ *Email abierto*\n\n${label}\n\n¡Buen momento para hacer seguimiento!`,
+        { parse_mode: "Markdown" }
+      );
+    }
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+  }
+});
+
+app.get("/", (_, res) => res.send("XORA Bot OK"));
+
+app.listen(PORT, () => console.log(`Webhook server en puerto ${PORT}`));
 
 // ── AUTH ──────────────────────────────────────────────────
 
@@ -657,84 +956,70 @@ function sendLong(chatId, text) {
 
 // ── COMMANDS ──────────────────────────────────────────────
 
-bot.onText(/\/start/, (msg) => {
-  if (!isAuthorized(msg.from.id)) return;
-  history.set(msg.from.id, []);
-  bot.sendMessage(msg.chat.id,
-    "Hola Marcos! Soy tu asistente de XORA.\n\n" +
-    "Comandos:\n" +
-    "/ayuda — todo lo que puedo hacer\n" +
-    "/clientes — CRM completo\n" +
-    "/stats — estadísticas de ventas\n" +
-    "/seguimiento — seguimientos pendientes\n" +
-    "/exportar — exportar CRM a CSV\n" +
-    "/contenido — generar contenido para redes sociales\n" +
-    "/reset — reiniciar conversación\n\n" +
-    "También puedo:\n" +
-    "📸 Analizar fotos de negocios (mándame una imagen)\n" +
-    `🎤 Transcribir mensajes de voz${openai ? " ✓" : " (activa con OPENAI_API_KEY)"}\n\n` +
-    "¿Qué necesitas hoy?"
-  );
-});
-
 bot.onText(/\/ayuda/, (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   bot.sendMessage(msg.chat.id,
     `🤖 *XORA Bot — Todo lo que puedo hacer*\n\n` +
 
     `*📋 COMANDOS*\n` +
-    `/clientes — CRM completo con todos tus contactos y su estado\n` +
-    `/stats — Estadísticas: tasa de conversión, respuesta, por sector\n` +
-    `/seguimiento — Lista de clientes sin respuesta hace +3 días\n` +
-    `/exportar — Descarga el CRM en Excel/CSV\n` +
-    `/contenido — Genera posts, Reels, stories o copies para redes\n` +
-    `/ayuda — Este mensaje\n` +
-    `/reset — Borra el historial de conversación\n\n` +
+    `/clientes — CRM completo\n` +
+    `/stats — tasa de conversión, respuesta y pipeline\n` +
+    `/pipeline — vista del embudo de ventas con días\n` +
+    `/seguimiento — clientes sin respuesta hace +3 días\n` +
+    `/exportar — descarga el CRM en CSV\n` +
+    `/precios — ver y editar tarifas\n` +
+    `/plantillas — gestionar plantillas de email\n` +
+    `/recordatorios — ver recordatorios pendientes\n` +
+    `/presupuesto — calculadora de precios interactiva\n` +
+    `/contenido — generar contenido para redes\n` +
+    `/reset — borrar historial\n` +
+    `/ayuda — este mensaje\n\n` +
 
     `*📧 EMAILS*\n` +
-    `• Busco el email de un negocio automáticamente\n` +
-    `• Redacto emails personalizados por sector (gimnasio, moda, restaurante, ecommerce)\n` +
-    `• Te muestro el email para que lo revises antes de enviar\n` +
-    `• /enviar para mandarlo · /cancelar para descartarlo\n` +
-    `• Puedo adjuntar una propuesta en PDF al email\n` +
-    `• Guardo el cliente en el CRM automáticamente al enviar\n\n` +
+    `• Busco emails de negocios automáticamente\n` +
+    `• Redacto y envío emails personalizados por sector\n` +
+    `• Puedo adjuntar propuesta en PDF\n` +
+    `• Te aviso cuando alguien *abre* tu email 👁️\n` +
+    `• Seguimiento automático tras X días sin respuesta\n\n` +
 
-    `*🔍 BÚSQUEDA DE NEGOCIOS*\n` +
-    `• "Búscame gimnasios en Madrid" → te doy 10 resultados con web\n` +
-    `• "Encuentra el email de [negocio]" → busco su contacto\n` +
-    `• Analizo cada negocio y te digo qué ofrecerles\n\n` +
+    `*🛒 PRESUPUESTOS*\n` +
+    `• Calculo el precio exacto con todos los extras\n` +
+    `• Precios editables desde Telegram\n` +
+    `• "Actualiza el vídeo unitario a 250€" y listo\n\n` +
 
     `*📄 PROPUESTAS*\n` +
-    `• Genero propuestas comerciales completas en texto\n` +
-    `• También en PDF profesional para adjuntar al email\n` +
-    `• Incluye servicios, precio, proceso y garantías\n\n` +
+    `• En texto o PDF profesional\n` +
+    `• Adjuntadas automáticamente al email\n\n` +
 
-    `*📱 CONTENIDO PARA REDES*\n` +
-    `• Posts de Instagram con gancho + cuerpo + hashtags\n` +
-    `• Guiones de Reel escena a escena con texto y voz en off\n` +
-    `• Secuencias de Stories slide a slide\n` +
-    `• Copy publicitario para anuncios\n\n` +
+    `*🎉 ONBOARDING*\n` +
+    `• Al marcar un cliente como "cliente", envío automáticamente un email de bienvenida con el proceso\n\n` +
 
-    `*🎤 VOZ*\n` +
-    `• Mándame un audio de voz y lo transcribo y respondo\n` +
-    `• Ideal cuando vas por la calle${openai ? " ✓ activo" : " (activa con OPENAI_API_KEY)"}\n\n` +
+    `*🔔 RECORDATORIOS*\n` +
+    `• "Recuérdame el jueves llamar a [cliente]"\n` +
+    `• Te aviso a la hora exacta vía Telegram\n\n` +
 
-    `*📸 IMÁGENES*\n` +
-    `• Mándame foto de un negocio y lo analizo\n` +
-    `• Te digo qué tipo de empresa es, qué necesita y cómo contactarles\n\n` +
+    `*📱 CONTENIDO*\n` +
+    `• Posts, Reels, Stories, copies publicitarios\n` +
+    `• Calendarios editoriales mensuales\n` +
+    `• Análisis de competencia\n\n` +
 
-    `*🧠 MEMORIA*\n` +
-    `• Recuerdo todo lo que me cuentas sobre XORA\n` +
-    `• Guardo info permanente: "recuerda que mi precio mínimo es 200€"\n` +
-    `• El historial de conversación persiste entre sesiones\n\n` +
+    `*🎤 VOZ & 📸 FOTOS*\n` +
+    `• Audio → transcripción → respuesta automática\n` +
+    `• Foto de un negocio → análisis y propuesta\n\n` +
 
-    `*⏰ SEGUIMIENTO AUTOMÁTICO*\n` +
-    `• Aviso cada día si hay clientes sin respuesta hace +3 días\n` +
-    `• Con AUTO_FOLLOWUP=true envío los emails de seguimiento solo\n\n` +
-
-    `_Ejemplo de uso completo:_\n` +
-    `"Búscame 10 gimnasios en Barcelona, encuentra sus emails y mándales un email con propuesta PDF adjunta"`,
+    `*🧠 MEMORIA & CRM*\n` +
+    `• Recuerdo todo entre sesiones (Redis)\n` +
+    `• Plantillas de email guardadas por ti\n` +
+    `• Exporta el CRM a Excel con /exportar`,
     { parse_mode: "Markdown" }
+  );
+});
+
+bot.onText(/\/start/, (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  history.set(msg.from.id, []);
+  bot.sendMessage(msg.chat.id,
+    "Hola Marcos! Soy tu asistente de XORA.\n\nUsa /ayuda para ver todo lo que puedo hacer."
   );
 });
 
@@ -755,9 +1040,10 @@ bot.onText(/\/clientes/, async (msg) => {
     contactado: list.filter(c => c.status === "contactado").length,
     interesado: list.filter(c => c.status === "interesado").length,
     negociando: list.filter(c => c.status === "negociando").length,
-    cliente: list.filter(c => c.status === "cliente").length,
+    cliente:    list.filter(c => c.status === "cliente").length,
   };
-  const header = `📊 CRM XORA — ${list.length} contactos\nContactados: ${stats.contactado} | Interesados: ${stats.interesado} | Negociando: ${stats.negociando} | Clientes: ${stats.cliente}\n\n`;
+  const header = `📊 CRM XORA — ${list.length} contactos\n` +
+    `Contactados: ${stats.contactado} | Interesados: ${stats.interesado} | Negociando: ${stats.negociando} | Clientes: ${stats.cliente}\n\n`;
   const result = await getClients();
   sendLong(msg.chat.id, header + result);
 });
@@ -772,14 +1058,24 @@ bot.onText(/\/stats/, async (msg) => {
     contactado: list.filter(c => c.status === "contactado").length,
     interesado: list.filter(c => c.status === "interesado").length,
     negociando: list.filter(c => c.status === "negociando").length,
-    cliente: list.filter(c => c.status === "cliente").length,
+    cliente:    list.filter(c => c.status === "cliente").length,
     descartado: list.filter(c => c.status === "descartado").length,
   };
-  const convRate = total > 0 ? ((byStatus.cliente / total) * 100).toFixed(1) : 0;
+  const convRate     = total > 0 ? ((byStatus.cliente / total) * 100).toFixed(1) : 0;
   const responseRate = total > 0 ? (((total - byStatus.contactado - byStatus.descartado) / total) * 100).toFixed(1) : 0;
   const bySector = {};
   list.forEach(c => { const s = c.sector || "sin sector"; bySector[s] = (bySector[s] || 0) + 1; });
   const sectorLines = Object.entries(bySector).sort((a, b) => b[1] - a[1]).map(([s, n]) => `  ${s}: ${n}`).join("\n");
+
+  // Average time to close
+  const closed = list.filter(c => c.status === "cliente" && c.contacted_at && c.closed_at);
+  let avgClose = "—";
+  if (closed.length > 0) {
+    const avg = closed.reduce((sum, c) =>
+      sum + Math.floor((new Date(c.closed_at) - new Date(c.contacted_at)) / 86400000), 0) / closed.length;
+    avgClose = `${Math.round(avg)} días`;
+  }
+
   const now = Date.now();
   const pendingFU = list.filter(c => {
     if (c.status !== "contactado" || !c.contacted_at) return false;
@@ -790,7 +1086,8 @@ bot.onText(/\/stats/, async (msg) => {
     `📈 ESTADÍSTICAS XORA\n\n` +
     `Total contactos: ${total}\n` +
     `Tasa de conversión: ${convRate}%\n` +
-    `Tasa de respuesta: ${responseRate}%\n\n` +
+    `Tasa de respuesta: ${responseRate}%\n` +
+    `Tiempo medio de cierre: ${avgClose}\n\n` +
     `Por estado:\n` +
     `  📤 Contactados: ${byStatus.contactado}\n` +
     `  💬 Interesados: ${byStatus.interesado}\n` +
@@ -802,6 +1099,28 @@ bot.onText(/\/stats/, async (msg) => {
   );
 });
 
+bot.onText(/\/pipeline/, async (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  await bot.sendChatAction(msg.chat.id, "typing");
+  const clients = await loadClients();
+  const now = Date.now();
+  const stages = ["contactado", "interesado", "negociando", "cliente"];
+  const emojis = { contactado: "📤", interesado: "💬", negociando: "🤝", cliente: "✅" };
+  let out = "🔄 *PIPELINE DE VENTAS*\n\n";
+  for (const stage of stages) {
+    const list = Object.values(clients).filter(c => c.status === stage);
+    if (!list.length) continue;
+    out += `${emojis[stage]} *${stage.toUpperCase()}* (${list.length})\n`;
+    list.forEach(c => {
+      const ref = c.contacted_at ? Math.floor((now - new Date(c.contacted_at)) / 86400000) : null;
+      const daysStr = ref !== null ? ` · ${ref}d` : "";
+      out += `  • ${c.name}${daysStr}${c.email ? ` — ${c.email}` : ""}\n`;
+    });
+    out += "\n";
+  }
+  bot.sendMessage(msg.chat.id, out, { parse_mode: "Markdown" });
+});
+
 bot.onText(/\/seguimiento/, async (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   await bot.sendChatAction(msg.chat.id, "typing");
@@ -811,10 +1130,7 @@ bot.onText(/\/seguimiento/, async (msg) => {
     if (c.status !== "contactado" || !c.contacted_at) return false;
     return Math.floor((now - new Date(c.contacted_at)) / 86400000) >= 3;
   });
-  if (!pending.length) {
-    bot.sendMessage(msg.chat.id, "✅ No hay seguimientos pendientes.");
-    return;
-  }
+  if (!pending.length) { bot.sendMessage(msg.chat.id, "✅ No hay seguimientos pendientes."); return; }
   const lines = pending.map(c => {
     const days = Math.floor((now - new Date(c.contacted_at)) / 86400000);
     return `• ${c.name} — ${days} días sin respuesta\n  ${c.email || "sin email"}`;
@@ -828,9 +1144,9 @@ bot.onText(/\/exportar/, async (msg) => {
   const clients = await loadClients();
   const list = Object.values(clients);
   if (!list.length) { bot.sendMessage(msg.chat.id, "No hay clientes para exportar."); return; }
-  const headers = "Nombre,Email,Sector,Estado,Notas,Fecha contacto\n";
+  const headers = "Nombre,Email,Sector,Estado,Notas,Fecha contacto,Fecha cierre\n";
   const rows = list.map(c =>
-    `"${c.name}","${c.email || ""}","${c.sector || ""}","${c.status}","${(c.notes || "").replace(/"/g, "'").replace(/\n/g, " ")}","${c.contacted_at ? new Date(c.contacted_at).toLocaleDateString("es-ES") : ""}"`
+    `"${c.name}","${c.email || ""}","${c.sector || ""}","${c.status}","${(c.notes || "").replace(/"/g, "'").replace(/\n/g, " ")}","${c.contacted_at ? new Date(c.contacted_at).toLocaleDateString("es-ES") : ""}","${c.closed_at ? new Date(c.closed_at).toLocaleDateString("es-ES") : ""}"`
   ).join("\n");
   const buffer = Buffer.from(headers + rows, "utf-8");
   await bot.sendDocument(msg.chat.id, buffer, {}, {
@@ -839,10 +1155,54 @@ bot.onText(/\/exportar/, async (msg) => {
   });
 });
 
+bot.onText(/\/precios/, async (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  await bot.sendChatAction(msg.chat.id, "typing");
+  const prices = await loadPrices();
+  const lines = Object.entries(prices).map(([key, v]) => `• ${v.label}: *${v.price}€* (\`${key}\`)`).join("\n");
+  bot.sendMessage(msg.chat.id,
+    `💶 *Tarifas XORA*\n\n${lines}\n\n_Para cambiar un precio escríbeme:_\n"Actualiza el precio de pack3\\_videos a 450€"`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+bot.onText(/\/plantillas/, async (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  await bot.sendChatAction(msg.chat.id, "typing");
+  const templates = await loadTemplates();
+  const list = Object.values(templates);
+  if (!list.length) {
+    bot.sendMessage(msg.chat.id, "No hay plantillas guardadas aún.\n\nPídeme que guarde una: \"Guarda esta plantilla para gimnasios: [asunto y cuerpo]\"");
+    return;
+  }
+  const lines = list.map(t => `📝 *${t.name}* [${t.sector}]\nAsunto: ${t.subject}`).join("\n\n");
+  bot.sendMessage(msg.chat.id, `📋 *Plantillas guardadas*\n\n${lines}\n\n_Pídeme una para usarla en el siguiente email._`, { parse_mode: "Markdown" });
+});
+
+bot.onText(/\/recordatorios/, async (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  const reminders = await loadReminders();
+  const pending = reminders.filter(r => !r.done);
+  if (!pending.length) { bot.sendMessage(msg.chat.id, "✅ No tienes recordatorios pendientes."); return; }
+  const lines = pending.map(r => {
+    const d = new Date(r.datetime);
+    return `🔔 *${d.toLocaleDateString("es-ES")} a las ${r.time}*\n  ${r.text}`;
+  }).join("\n\n");
+  bot.sendMessage(msg.chat.id, `📅 *Recordatorios pendientes*\n\n${lines}`, { parse_mode: "Markdown" });
+});
+
+bot.onText(/\/presupuesto/, (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  bot.sendMessage(msg.chat.id,
+    "💶 *Calculadora de presupuesto*\n\nDime qué necesita el cliente y te calculo el precio exacto.\n\n_Ejemplos:_\n• \"Presupuesto para 3 vídeos y 5 fotos con derechos de anuncios\"\n• \"Cuánto es un pack de 5 vídeos con uso ilimitado y RAW\"\n• \"Precio de 1 vídeo solo\"",
+    { parse_mode: "Markdown" }
+  );
+});
+
 bot.onText(/\/contenido/, (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   bot.sendMessage(msg.chat.id,
-    "🎨 *Generador de contenido*\n\nDime:\n• Para qué cliente o sector\n• Tipo: post Instagram, guión Reel, stories, copy publicitario\n• Tema o producto específico\n• Tono: profesional, casual, motivacional\n\n_Ej: \"Genera un Reel para un gimnasio en Madrid, tema: clases de CrossFit, tono motivacional\"_",
+    "🎨 *Generador de contenido*\n\nDime:\n• Tipo: post, Reel, Stories, copy, calendario editorial\n• Sector o cliente\n• Tema y tono\n\n_Ej: \"Genera un calendario editorial de abril para un gimnasio en Madrid, 3 posts por semana, tono motivacional\"_",
     { parse_mode: "Markdown" }
   );
 });
@@ -857,12 +1217,23 @@ bot.onText(/\/enviar/, async (msg) => {
     if (pending.attach_proposal) {
       pdfBuffer = await generateProposalPDF({
         client_name: pending.business_name,
-        sector: pending.sector,
-        services: "Contenido visual con IA personalizado para tu marca",
-        budget: ""
+        sector:      pending.sector,
+        services:    "Contenido visual con IA personalizado para tu marca",
+        budget:      ""
       });
     }
-    await sendEmail({ ...pending, pdfBuffer, pdfFilename: `propuesta-xora-${pending.business_name.toLowerCase().replace(/\s+/g, "-")}.pdf` });
+    const emailId = await sendEmail({
+      ...pending, pdfBuffer,
+      pdfFilename: `propuesta-xora-${pending.business_name.toLowerCase().replace(/\s+/g, "-")}.pdf`
+    });
+
+    // Store tracking info for email open notifications
+    if (redis && emailId) {
+      await redis.setex(`${TRACKING_PREFIX}${emailId}`, 60 * 60 * 24 * 30, // 30 days
+        JSON.stringify({ business_name: pending.business_name, to: pending.to })
+      );
+    }
+
     await saveClient({ name: pending.business_name, email: pending.to, status: "contactado" });
     pendingEmails.delete(msg.from.id);
     bot.sendMessage(msg.chat.id,
@@ -887,14 +1258,14 @@ bot.onText(/\/cancelar/, (msg) => {
 bot.on("voice", async (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   if (!openai) {
-    bot.sendMessage(msg.chat.id, "🎤 Para usar voz, añade OPENAI_API_KEY en las variables de Railway.");
+    bot.sendMessage(msg.chat.id, "🎤 Añade OPENAI_API_KEY en Railway para activar los mensajes de voz.");
     return;
   }
   await bot.sendChatAction(msg.chat.id, "typing");
   try {
-    const file = await bot.getFile(msg.voice.file_id);
+    const file    = await bot.getFile(msg.voice.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
-    const text = await transcribeVoice(fileUrl);
+    const text    = await transcribeVoice(fileUrl);
     if (!text) { bot.sendMessage(msg.chat.id, "No pude transcribir el audio. Inténtalo de nuevo."); return; }
 
     await bot.sendMessage(msg.chat.id, `🎤 _"${text}"_`, { parse_mode: "Markdown" });
@@ -904,7 +1275,6 @@ bot.on("voice", async (msg) => {
     userHistory.push({ role: "user", content: text });
     const { text: reply, messages } = await askClaude(userHistory, userId);
     await persistHistory(userId, messages);
-
     if (reply) {
       const pending = pendingEmails.get(userId);
       let finalReply = reply;
@@ -923,14 +1293,14 @@ bot.on("photo", async (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   await bot.sendChatAction(msg.chat.id, "typing");
   try {
-    const photo = msg.photo[msg.photo.length - 1];
-    const file = await bot.getFile(photo.file_id);
+    const photo   = msg.photo[msg.photo.length - 1];
+    const file    = await bot.getFile(photo.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
-    const res = await fetch(fileUrl);
-    const base64 = Buffer.from(await res.arrayBuffer()).toString("base64");
+    const res     = await fetch(fileUrl);
+    const base64  = Buffer.from(await res.arrayBuffer()).toString("base64");
 
     const caption = msg.caption || "Analiza esta imagen. Si es un negocio, dime qué tipo de empresa es, qué contenido visual podría necesitar, cómo contactarles y qué propuesta hacerles desde XORA.";
-    const userId = msg.from.id;
+    const userId  = msg.from.id;
     const userHistory = await getHistory(userId);
 
     const messagesWithImage = [
@@ -945,8 +1315,6 @@ bot.on("photo", async (msg) => {
     ];
 
     const { text: reply, messages } = await askClaude(messagesWithImage, userId);
-
-    // Persistir sin la imagen (evitar overflow en Redis)
     const cleanMessages = messages.map(m => {
       if (Array.isArray(m.content) && m.content.some(b => b.type === "image")) {
         return { ...m, content: `[Imagen analizada] ${caption}` };
@@ -954,7 +1322,6 @@ bot.on("photo", async (msg) => {
       return m;
     });
     await persistHistory(userId, cleanMessages);
-
     if (reply) bot.sendMessage(msg.chat.id, reply);
   } catch (err) {
     console.error("Error en foto:", err.message);
@@ -980,7 +1347,6 @@ bot.on("message", async (msg) => {
   try {
     const { text, messages } = await askClaude(userHistory, userId);
     await persistHistory(userId, messages);
-
     if (!text) { bot.sendMessage(chatId, "Sin respuesta. Inténtalo de nuevo."); return; }
 
     const pending = pendingEmails.get(userId);
@@ -988,7 +1354,6 @@ bot.on("message", async (msg) => {
     if (pending) {
       reply += `\n\n─────────────────\n📧 EMAIL LISTO\nPara: ${pending.to}\nAsunto: ${pending.subject}\n\n${pending.body}\n─────────────────\n/enviar para enviar · /cancelar para descartar`;
     }
-
     sendLong(chatId, reply);
   } catch (err) {
     console.error("Error:", err.message);
@@ -996,4 +1361,4 @@ bot.on("message", async (msg) => {
   }
 });
 
-console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | stats ✓ | exportar ✓`);
+console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | recordatorios ✓ | presupuestos ✓ | webhook ✓`);
