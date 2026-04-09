@@ -5,6 +5,7 @@ import Redis from "ioredis";
 import dotenv from "dotenv";
 import PDFDocument from "pdfkit";
 import OpenAI, { toFile } from "openai";
+import { createHash } from "crypto";
 
 dotenv.config();
 
@@ -179,11 +180,16 @@ Estructura siempre el análisis así:
 ## Análisis de competencia
 Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
 
+## Actualizar precios en la web
+Cuando Marcos pida cambiar un precio en la web, usa update_web_price.
+Nombres exactos de servicios: "1 vídeo", "Pack 3 vídeos", "Pack 5 vídeos", "Pack 3 fotos", "Pack 5 fotos", "Pack 8 fotos".
+Después de actualizar la web, usa también update_price para mantener el CRM sincronizado.
+
 ## Herramientas disponibles
 - search_web, search_businesses, search_email, analyze_business
 - prepare_email, save_client, update_client, get_clients
 - generate_proposal
-- update_price, get_prices
+- update_price, get_prices, update_web_price
 - save_template, get_templates
 - calculate_budget
 - save_memory, get_memory
@@ -346,6 +352,18 @@ const TOOLS = [
         sector: { type: "string", description: "Filtrar por sector (opcional)" }
       },
       required: []
+    }
+  },
+  {
+    name: "update_web_price",
+    description: "Actualiza el precio de un servicio en la web xoralab.com y redesplega automáticamente en Netlify.",
+    input_schema: {
+      type: "object",
+      properties: {
+        service_name: { type: "string", description: "Nombre exacto: '1 vídeo', 'Pack 3 vídeos', 'Pack 5 vídeos', 'Pack 3 fotos', 'Pack 5 fotos', 'Pack 8 fotos'" },
+        new_price:    { type: "number", description: "Nuevo precio en euros (sin símbolo €)" }
+      },
+      required: ["service_name", "new_price"]
     }
   },
   {
@@ -577,7 +595,7 @@ async function toolUpdatePrice(input) {
 async function toolGetPrices() {
   const prices = await loadPrices();
   return "TARIFAS XORA:\n" + Object.entries(prices)
-    .map(([k, v]) => `• ${v.label}: ${v.price}€`)
+    .map(([, v]) => `• ${v.label}: ${v.price}€`)
     .join("\n");
 }
 
@@ -606,6 +624,60 @@ async function toolGetTemplates(sectorFilter) {
   ).join("\n\n");
 }
 
+
+async function updateWebPrice(input) {
+  const NETLIFY_TOKEN   = process.env.NETLIFY_TOKEN;
+  const NETLIFY_SITE_ID = process.env.NETLIFY_SITE_ID;
+  if (!NETLIFY_TOKEN || !NETLIFY_SITE_ID) return "Faltan NETLIFY_TOKEN o NETLIFY_SITE_ID en Railway.";
+
+  // 1. Fetch current HTML from live site
+  let html;
+  try {
+    const r = await fetch(`https://xoralab.com`, { signal: AbortSignal.timeout(10000) });
+    html = await r.text();
+  } catch (err) {
+    return `Error descargando la web: ${err.message}`;
+  }
+
+  // 2. Replace price in HTML
+  // Matches: <div class="price-name">Pack 3 fotos</div>\n<div>...<span class="price-amount">120€</span>
+  const escaped = input.service_name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(
+    `(<div class="price-name">${escaped}<\\/div>\\s*<div[^>]*>(?:<span class="price-from">desde <\\/span>)?<span class="price-amount">)[^<]+(</span>)`,
+    "i"
+  );
+  if (!regex.test(html)) return `No encontré el servicio "${input.service_name}" en la web. Nombres válidos: "1 vídeo", "Pack 3 vídeos", "Pack 5 vídeos", "Pack 3 fotos", "Pack 5 fotos", "Pack 8 fotos"`;
+
+  html = html.replace(regex, `$1${input.new_price}€$2`);
+
+  // 3. Compute SHA1 for Netlify
+  const sha1 = createHash("sha1").update(html).digest("hex");
+
+  // 4. Create deploy
+  let deploy;
+  try {
+    const r = await fetch(`https://api.netlify.com/api/v1/sites/${NETLIFY_SITE_ID}/deploys`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${NETLIFY_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ files: { "/index.html": sha1 } })
+    });
+    deploy = await r.json();
+    if (!deploy.id) return `Error creando deploy: ${JSON.stringify(deploy)}`;
+  } catch (err) {
+    return `Error en Netlify API: ${err.message}`;
+  }
+
+  // 5. Upload file if required
+  if (deploy.required?.length > 0) {
+    await fetch(`https://api.netlify.com/api/v1/deploys/${deploy.id}/files/index.html`, {
+      method: "PUT",
+      headers: { "Authorization": `Bearer ${NETLIFY_TOKEN}`, "Content-Type": "application/octet-stream" },
+      body: html
+    });
+  }
+
+  return `✅ Precio de "${input.service_name}" actualizado a ${input.new_price}€ en xoralab.com. La web se actualiza en unos segundos.`;
+}
 
 async function toolCalculateBudget(input) {
   const prices = await loadPrices();
@@ -672,6 +744,7 @@ async function runTool(name, input, userId) {
     case "get_clients":       return await getClients(input.status_filter);
     case "generate_proposal": return generateProposalText(input);
     case "update_price":      return await toolUpdatePrice(input);
+    case "update_web_price":  return await updateWebPrice(input);
     case "get_prices":        return await toolGetPrices();
     case "save_template":     return await toolSaveTemplate(input);
     case "get_templates":     return await toolGetTemplates(input.sector);
