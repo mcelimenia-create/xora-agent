@@ -205,6 +205,45 @@ function prepareEmail(userId, { to, business_name, subject, body }) {
   return `Email preparado para ${business_name} (${to}). Pendiente de confirmación del usuario.`;
 }
 
+function buildHtmlEmail(body) {
+  const siteUrl = process.env.SITE_URL || "https://xora-lab.netlify.app";
+  const logoUrl = `${siteUrl}/logo.png`;
+  const lines = body.split("\n").map((l) => `<p style="margin:0 0 10px 0">${l}</p>`).join("");
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:32px 0">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;max-width:600px;width:100%">
+        <!-- HEADER -->
+        <tr>
+          <td style="background:#030d1a;padding:28px 40px;text-align:center">
+            <img src="${logoUrl}" width="52" height="52" alt="XORA" style="display:inline-block;vertical-align:middle;margin-right:12px" />
+            <span style="color:#ffffff;font-size:22px;font-weight:900;letter-spacing:3px;vertical-align:middle">XORA</span>
+          </td>
+        </tr>
+        <!-- BODY -->
+        <tr>
+          <td style="padding:40px;color:#1a1a1a;font-size:15px;line-height:1.7">
+            ${lines}
+          </td>
+        </tr>
+        <!-- FOOTER -->
+        <tr>
+          <td style="background:#f9f9f9;padding:20px 40px;text-align:center;font-size:12px;color:#999999;border-top:1px solid #eeeeee">
+            <p style="margin:0">XORA · Agencia de contenido con IA · <a href="mailto:contacto@xoralab.com" style="color:#1d6fd4;text-decoration:none">contacto@xoralab.com</a></p>
+            <p style="margin:6px 0 0 0"><a href="${siteUrl}" style="color:#1d6fd4;text-decoration:none">${siteUrl}</a></p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 async function sendEmail({ to, subject, body }) {
   if (!RESEND_API_KEY) {
     throw new Error("Falta RESEND_API_KEY en las variables de entorno");
@@ -215,7 +254,11 @@ async function sendEmail({ to, subject, body }) {
     to,
     subject,
     text: body,
+    html: buildHtmlEmail(body),
     reply_to: process.env.REPLY_TO_EMAIL,
+    headers: {
+      "X-Entity-Ref-ID": `xora-${Date.now()}`,
+    },
   });
   if (error) throw new Error(error.message);
 }
