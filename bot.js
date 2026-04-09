@@ -663,6 +663,7 @@ bot.onText(/\/start/, (msg) => {
   bot.sendMessage(msg.chat.id,
     "Hola Marcos! Soy tu asistente de XORA.\n\n" +
     "Comandos:\n" +
+    "/ayuda — todo lo que puedo hacer\n" +
     "/clientes — CRM completo\n" +
     "/stats — estadísticas de ventas\n" +
     "/seguimiento — seguimientos pendientes\n" +
@@ -673,6 +674,67 @@ bot.onText(/\/start/, (msg) => {
     "📸 Analizar fotos de negocios (mándame una imagen)\n" +
     `🎤 Transcribir mensajes de voz${openai ? " ✓" : " (activa con OPENAI_API_KEY)"}\n\n` +
     "¿Qué necesitas hoy?"
+  );
+});
+
+bot.onText(/\/ayuda/, (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  bot.sendMessage(msg.chat.id,
+    `🤖 *XORA Bot — Todo lo que puedo hacer*\n\n` +
+
+    `*📋 COMANDOS*\n` +
+    `/clientes — CRM completo con todos tus contactos y su estado\n` +
+    `/stats — Estadísticas: tasa de conversión, respuesta, por sector\n` +
+    `/seguimiento — Lista de clientes sin respuesta hace +3 días\n` +
+    `/exportar — Descarga el CRM en Excel/CSV\n` +
+    `/contenido — Genera posts, Reels, stories o copies para redes\n` +
+    `/ayuda — Este mensaje\n` +
+    `/reset — Borra el historial de conversación\n\n` +
+
+    `*📧 EMAILS*\n` +
+    `• Busco el email de un negocio automáticamente\n` +
+    `• Redacto emails personalizados por sector (gimnasio, moda, restaurante, ecommerce)\n` +
+    `• Te muestro el email para que lo revises antes de enviar\n` +
+    `• /enviar para mandarlo · /cancelar para descartarlo\n` +
+    `• Puedo adjuntar una propuesta en PDF al email\n` +
+    `• Guardo el cliente en el CRM automáticamente al enviar\n\n` +
+
+    `*🔍 BÚSQUEDA DE NEGOCIOS*\n` +
+    `• "Búscame gimnasios en Madrid" → te doy 10 resultados con web\n` +
+    `• "Encuentra el email de [negocio]" → busco su contacto\n` +
+    `• Analizo cada negocio y te digo qué ofrecerles\n\n` +
+
+    `*📄 PROPUESTAS*\n` +
+    `• Genero propuestas comerciales completas en texto\n` +
+    `• También en PDF profesional para adjuntar al email\n` +
+    `• Incluye servicios, precio, proceso y garantías\n\n` +
+
+    `*📱 CONTENIDO PARA REDES*\n` +
+    `• Posts de Instagram con gancho + cuerpo + hashtags\n` +
+    `• Guiones de Reel escena a escena con texto y voz en off\n` +
+    `• Secuencias de Stories slide a slide\n` +
+    `• Copy publicitario para anuncios\n\n` +
+
+    `*🎤 VOZ*\n` +
+    `• Mándame un audio de voz y lo transcribo y respondo\n` +
+    `• Ideal cuando vas por la calle${openai ? " ✓ activo" : " (activa con OPENAI_API_KEY)"}\n\n` +
+
+    `*📸 IMÁGENES*\n` +
+    `• Mándame foto de un negocio y lo analizo\n` +
+    `• Te digo qué tipo de empresa es, qué necesita y cómo contactarles\n\n` +
+
+    `*🧠 MEMORIA*\n` +
+    `• Recuerdo todo lo que me cuentas sobre XORA\n` +
+    `• Guardo info permanente: "recuerda que mi precio mínimo es 200€"\n` +
+    `• El historial de conversación persiste entre sesiones\n\n` +
+
+    `*⏰ SEGUIMIENTO AUTOMÁTICO*\n` +
+    `• Aviso cada día si hay clientes sin respuesta hace +3 días\n` +
+    `• Con AUTO_FOLLOWUP=true envío los emails de seguimiento solo\n\n` +
+
+    `_Ejemplo de uso completo:_\n` +
+    `"Búscame 10 gimnasios en Barcelona, encuentra sus emails y mándales un email con propuesta PDF adjunta"`,
+    { parse_mode: "Markdown" }
   );
 });
 
