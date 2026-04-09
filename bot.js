@@ -155,11 +155,24 @@ Genera directamente sin herramientas:
 - Copy publicitario: headline + descripción + CTA
 - Calendario editorial: tabla por semanas con fecha, formato, tema y caption
 
+## Análisis de negocios
+Cuando Marcos pase el nombre y/o web de una empresa, usa analyze_business para:
+1. Leer el contenido real de su web
+2. Buscar su presencia en redes sociales
+3. Identificar sus puntos débiles en contenido visual
+4. Proponer servicios concretos de XORA que les vendrían bien
+
+Estructura siempre el análisis así:
+🔍 **Qué hace [empresa]** — resumen breve
+📉 **Puntos débiles detectados** — lista concreta (fotos de baja calidad, sin vídeo, sin presencia en Instagram, fotos genéricas de stock, etc.)
+💡 **Cómo puede ayudar XORA** — servicios específicos con precio orientativo
+📧 **Ángulo de contacto** — el hook perfecto para el email de presentación
+
 ## Análisis de competencia
 Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
 
 ## Herramientas disponibles
-- search_web, search_businesses, search_email
+- search_web, search_businesses, search_email, analyze_business
 - prepare_email, save_client, update_client, get_clients
 - generate_proposal
 - update_price, get_prices
@@ -187,6 +200,19 @@ const TOOLS = [
         sector: { type: "string" }
       },
       required: ["query", "sector"]
+    }
+  },
+  {
+    name: "analyze_business",
+    description: "Analiza una empresa: lee su web, busca su presencia en redes y detecta puntos débiles en contenido visual para proponer servicios de XORA.",
+    input_schema: {
+      type: "object",
+      properties: {
+        business_name: { type: "string", description: "Nombre de la empresa" },
+        website:       { type: "string", description: "URL de su web (ej: https://ejemplo.com)" },
+        sector:        { type: "string", description: "Sector si se conoce" }
+      },
+      required: ["business_name"]
     }
   },
   {
@@ -364,6 +390,50 @@ async function searchWeb(query, count = 5) {
   } catch (err) {
     return `Error al buscar: ${err.message}`;
   }
+}
+
+async function fetchWebContent(url) {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; XORABot/1.0)",
+        "Accept": "text/html"
+      },
+      signal: AbortSignal.timeout(8000)
+    });
+    const html = await res.text();
+    // Strip tags, collapse whitespace, limit length
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 4000);
+    return text;
+  } catch (err) {
+    return `No se pudo leer la web: ${err.message}`;
+  }
+}
+
+async function analyzeBusiness(input) {
+  const parts = [];
+
+  // 1. Fetch website content if provided
+  if (input.website) {
+    const content = await fetchWebContent(input.website);
+    parts.push(`CONTENIDO WEB DE ${input.business_name}:\n${content}`);
+  }
+
+  // 2. Search for social presence and general info
+  const socialResults = await searchWeb(`${input.business_name} ${input.sector || ""} Instagram redes sociales`, 5);
+  parts.push(`PRESENCIA EN REDES SOCIALES:\n${socialResults}`);
+
+  // 3. Search for reviews/reputation
+  const repResults = await searchWeb(`${input.business_name} opiniones reseñas calidad`, 3);
+  parts.push(`REPUTACIÓN ONLINE:\n${repResults}`);
+
+  return parts.join("\n\n---\n\n");
 }
 
 async function searchEmail(input) {
@@ -584,6 +654,7 @@ async function toolCalculateBudget(input) {
 
 async function runTool(name, input, userId) {
   switch (name) {
+    case "analyze_business":  return await analyzeBusiness(input);
     case "search_web":        return await searchWeb(input.query, 5);
     case "search_businesses": return await searchWeb(`${input.query} email contacto web`, 10);
     case "search_email":      return await searchEmail(input);
