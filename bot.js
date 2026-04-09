@@ -5,7 +5,6 @@ import Redis from "ioredis";
 import dotenv from "dotenv";
 import PDFDocument from "pdfkit";
 import OpenAI, { toFile } from "openai";
-import express from "express";
 
 dotenv.config();
 
@@ -19,7 +18,6 @@ const SITE_URL          = process.env.SITE_URL   || "https://xoralab.com";
 const ALLOWED_USER_ID   = process.env.ALLOWED_USER_ID ? parseInt(process.env.ALLOWED_USER_ID) : null;
 const AUTO_FOLLOWUP     = process.env.AUTO_FOLLOWUP === "true";
 const AUTO_FOLLOWUP_DAYS = parseInt(process.env.AUTO_FOLLOWUP_DAYS || "5");
-const PORT              = process.env.PORT || 3000;
 
 if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
   console.error("Faltan TELEGRAM_TOKEN o ANTHROPIC_API_KEY");
@@ -37,8 +35,6 @@ const MEMORY_KEY        = "xora:memory";
 const CLIENTS_KEY       = "xora:clients";
 const PRICES_KEY        = "xora:prices";
 const TEMPLATES_KEY     = "xora:templates";
-const REMINDERS_KEY     = "xora:reminders";
-const TRACKING_PREFIX   = "xora:track:";
 
 // ── PRICE HELPERS ─────────────────────────────────────────
 
@@ -71,16 +67,6 @@ async function loadTemplates() {
 }
 async function saveTemplatesData(data) {
   if (redis) await redis.set(TEMPLATES_KEY, JSON.stringify(data));
-}
-
-// ── REMINDER HELPERS ──────────────────────────────────────
-
-async function loadReminders() {
-  if (!redis) return [];
-  try { return JSON.parse(await redis.get(REMINDERS_KEY) || "[]"); } catch { return []; }
-}
-async function saveRemindersData(data) {
-  if (redis) await redis.set(REMINDERS_KEY, JSON.stringify(data));
 }
 
 // ── REDIS HELPERS ─────────────────────────────────────────
@@ -161,10 +147,6 @@ Sectores base: gimnasio, moda, restaurante, ecommerce, default.
 - Cuando el estado pase a "cliente", se enviará un email de bienvenida automáticamente.
 - Usa save_client / update_client / get_clients para gestionar.
 
-## Recordatorios
-- Usa set_reminder para crear recordatorios con fecha concreta.
-- Convierte siempre fechas relativas (mañana, el jueves, en 3 días) a formato ISO YYYY-MM-DD.
-
 ## Contenido para redes sociales
 Genera directamente sin herramientas:
 - Post Instagram: gancho + cuerpo (3-4 líneas) + CTA + 5 hashtags
@@ -182,7 +164,6 @@ Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/I
 - generate_proposal
 - update_price, get_prices
 - save_template, get_templates
-- set_reminder
 - calculate_budget
 - save_memory, get_memory
 
@@ -331,19 +312,6 @@ const TOOLS = [
         sector: { type: "string", description: "Filtrar por sector (opcional)" }
       },
       required: []
-    }
-  },
-  {
-    name: "set_reminder",
-    description: "Crea un recordatorio para una fecha concreta.",
-    input_schema: {
-      type: "object",
-      properties: {
-        text:    { type: "string", description: "Qué recordar" },
-        date:    { type: "string", description: "Fecha en formato YYYY-MM-DD" },
-        time:    { type: "string", description: "Hora en formato HH:MM (opcional, por defecto 09:00)" }
-      },
-      required: ["text", "date"]
     }
   },
   {
@@ -560,21 +528,6 @@ async function toolGetTemplates(sectorFilter) {
   ).join("\n\n");
 }
 
-async function toolSetReminder(input) {
-  const reminders = await loadReminders();
-  const datetime = `${input.date}T${input.time || "09:00"}:00`;
-  reminders.push({
-    id:      Date.now(),
-    text:    input.text,
-    date:    input.date,
-    time:    input.time || "09:00",
-    datetime,
-    done:    false,
-    userId:  ALLOWED_USER_ID
-  });
-  await saveRemindersData(reminders);
-  return `Recordatorio guardado: "${input.text}" para el ${new Date(datetime).toLocaleDateString("es-ES")} a las ${input.time || "09:00"}`;
-}
 
 async function toolCalculateBudget(input) {
   const prices = await loadPrices();
@@ -643,7 +596,6 @@ async function runTool(name, input, userId) {
     case "get_prices":        return await toolGetPrices();
     case "save_template":     return await toolSaveTemplate(input);
     case "get_templates":     return await toolGetTemplates(input.sector);
-    case "set_reminder":      return await toolSetReminder(input);
     case "calculate_budget":  return await toolCalculateBudget(input);
     case "save_memory": {
       const memory = await loadMemory();
@@ -878,63 +830,7 @@ async function checkFollowUps() {
   }
 }
 
-async function checkReminders() {
-  if (!ALLOWED_USER_ID) return;
-  try {
-    const reminders = await loadReminders();
-    const now = new Date();
-    let changed = false;
-    for (const r of reminders) {
-      if (r.done) continue;
-      const reminderDate = new Date(r.datetime);
-      if (reminderDate <= now) {
-        await bot.sendMessage(ALLOWED_USER_ID,
-          `🔔 *Recordatorio*\n\n${r.text}`,
-          { parse_mode: "Markdown" }
-        );
-        r.done = true;
-        changed = true;
-      }
-    }
-    if (changed) await saveRemindersData(reminders);
-  } catch (err) {
-    console.error("Error en recordatorios:", err.message);
-  }
-}
-
 setInterval(checkFollowUps, 24 * 60 * 60 * 1000);
-setInterval(checkReminders, 60 * 1000); // cada minuto
-
-// ── WEBHOOK SERVER (email opens) ──────────────────────────
-
-const app = express();
-app.use(express.json());
-
-app.post("/webhook/resend", async (req, res) => {
-  res.sendStatus(200);
-  try {
-    const { type, data } = req.body;
-    if (type === "email.opened" && ALLOWED_USER_ID) {
-      // Look up tracking info
-      let info = null;
-      if (redis) {
-        const raw = await redis.get(`${TRACKING_PREFIX}${data.email_id}`);
-        if (raw) info = JSON.parse(raw);
-      }
-      const label = info ? `*${info.business_name}* (${info.to})` : `ID: ${data.email_id}`;
-      await bot.sendMessage(ALLOWED_USER_ID,
-        `👁️ *Email abierto*\n\n${label}\n\n¡Buen momento para hacer seguimiento!`,
-        { parse_mode: "Markdown" }
-      );
-    }
-  } catch (err) {
-    console.error("Webhook error:", err.message);
-  }
-});
-
-app.get("/", (_, res) => res.send("XORA Bot OK"));
-
-app.listen(PORT, () => console.log(`Webhook server en puerto ${PORT}`));
 
 // ── AUTH ──────────────────────────────────────────────────
 
@@ -969,7 +865,6 @@ bot.onText(/\/ayuda/, (msg) => {
     `/exportar — descarga el CRM en CSV\n` +
     `/precios — ver y editar tarifas\n` +
     `/plantillas — gestionar plantillas de email\n` +
-    `/recordatorios — ver recordatorios pendientes\n` +
     `/presupuesto — calculadora de precios interactiva\n` +
     `/contenido — generar contenido para redes\n` +
     `/reset — borrar historial\n` +
@@ -979,7 +874,6 @@ bot.onText(/\/ayuda/, (msg) => {
     `• Busco emails de negocios automáticamente\n` +
     `• Redacto y envío emails personalizados por sector\n` +
     `• Puedo adjuntar propuesta en PDF\n` +
-    `• Te aviso cuando alguien *abre* tu email 👁️\n` +
     `• Seguimiento automático tras X días sin respuesta\n\n` +
 
     `*🛒 PRESUPUESTOS*\n` +
@@ -1179,18 +1073,6 @@ bot.onText(/\/plantillas/, async (msg) => {
   bot.sendMessage(msg.chat.id, `📋 *Plantillas guardadas*\n\n${lines}\n\n_Pídeme una para usarla en el siguiente email._`, { parse_mode: "Markdown" });
 });
 
-bot.onText(/\/recordatorios/, async (msg) => {
-  if (!isAuthorized(msg.from.id)) return;
-  const reminders = await loadReminders();
-  const pending = reminders.filter(r => !r.done);
-  if (!pending.length) { bot.sendMessage(msg.chat.id, "✅ No tienes recordatorios pendientes."); return; }
-  const lines = pending.map(r => {
-    const d = new Date(r.datetime);
-    return `🔔 *${d.toLocaleDateString("es-ES")} a las ${r.time}*\n  ${r.text}`;
-  }).join("\n\n");
-  bot.sendMessage(msg.chat.id, `📅 *Recordatorios pendientes*\n\n${lines}`, { parse_mode: "Markdown" });
-});
-
 bot.onText(/\/presupuesto/, (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   bot.sendMessage(msg.chat.id,
@@ -1222,17 +1104,10 @@ bot.onText(/\/enviar/, async (msg) => {
         budget:      ""
       });
     }
-    const emailId = await sendEmail({
+    await sendEmail({
       ...pending, pdfBuffer,
       pdfFilename: `propuesta-xora-${pending.business_name.toLowerCase().replace(/\s+/g, "-")}.pdf`
     });
-
-    // Store tracking info for email open notifications
-    if (redis && emailId) {
-      await redis.setex(`${TRACKING_PREFIX}${emailId}`, 60 * 60 * 24 * 30, // 30 days
-        JSON.stringify({ business_name: pending.business_name, to: pending.to })
-      );
-    }
 
     await saveClient({ name: pending.business_name, email: pending.to, status: "contactado" });
     pendingEmails.delete(msg.from.id);
@@ -1361,4 +1236,4 @@ bot.on("message", async (msg) => {
   }
 });
 
-console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | recordatorios ✓ | presupuestos ✓ | webhook ✓`);
+console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | presupuestos ✓`);
