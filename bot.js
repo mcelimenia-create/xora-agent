@@ -48,7 +48,26 @@ const pendingEmails = new Map();
 
 // Historial de conversación por usuario
 const history = new Map();
-const MAX_HISTORY = 20;
+const MAX_HISTORY = 40;
+
+async function loadHistory(userId) {
+  if (!redis) return [];
+  try {
+    const data = await redis.get(`xora:history:${userId}`);
+    return data ? JSON.parse(data) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveHistory(userId, messages) {
+  if (!redis) return;
+  // Solo guardamos roles user/assistant, no tool results (no serializables bien)
+  const clean = messages.filter(
+    (m) => typeof m.content === "string"
+  ).slice(-MAX_HISTORY);
+  await redis.set(`xora:history:${userId}`, JSON.stringify(clean));
+}
 
 const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, una agencia de contenido con IA especializada en creación de fotos y vídeos para marcas.
 
@@ -272,8 +291,11 @@ function isAuthorized(userId) {
   return userId === ALLOWED_USER_ID;
 }
 
-function getHistory(userId) {
-  if (!history.has(userId)) history.set(userId, []);
+async function getHistory(userId) {
+  if (!history.has(userId)) {
+    const saved = await loadHistory(userId);
+    history.set(userId, saved);
+  }
   return history.get(userId);
 }
 
@@ -294,10 +316,11 @@ bot.onText(/\/start/, (msg) => {
   );
 });
 
-bot.onText(/\/reset/, (msg) => {
+bot.onText(/\/reset/, async (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   history.set(msg.from.id, []);
   pendingEmails.delete(msg.from.id);
+  if (redis) await redis.del(`xora:history:${msg.from.id}`);
   bot.sendMessage(msg.chat.id, "Conversación reiniciada.");
 });
 
@@ -346,7 +369,7 @@ bot.on("message", async (msg) => {
 
   const userId = msg.from.id;
   const chatId = msg.chat.id;
-  const userHistory = getHistory(userId);
+  const userHistory = await getHistory(userId);
 
   userHistory.push({ role: "user", content: msg.text });
 
@@ -359,6 +382,7 @@ bot.on("message", async (msg) => {
   try {
     const { text, messages } = await askClaude(userHistory, userId);
     history.set(userId, messages);
+    await saveHistory(userId, messages);
 
     if (!text) {
       bot.sendMessage(chatId, "No obtuve respuesta. Inténtalo de nuevo.");
