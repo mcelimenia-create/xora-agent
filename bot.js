@@ -630,36 +630,66 @@ async function updateWebPrice(input) {
   const NETLIFY_SITE_ID = process.env.NETLIFY_SITE_ID;
   if (!NETLIFY_TOKEN || !NETLIFY_SITE_ID) return "Faltan NETLIFY_TOKEN o NETLIFY_SITE_ID en Railway.";
 
-  // 1. Fetch current HTML from live site
+  const authHeader = { "Authorization": `Bearer ${NETLIFY_TOKEN}` };
+
+  // 1. Get file list from latest deploy to preserve all files (logo.png etc.)
+  let existingFiles = {};
+  try {
+    const deploysRes = await fetch(
+      `https://api.netlify.com/api/v1/sites/${NETLIFY_SITE_ID}/deploys?per_page=1`,
+      { headers: authHeader }
+    );
+    const deploys = await deploysRes.json();
+    if (Array.isArray(deploys) && deploys.length > 0) {
+      const filesRes = await fetch(
+        `https://api.netlify.com/api/v1/deploys/${deploys[0].id}/files`,
+        { headers: authHeader }
+      );
+      const files = await filesRes.json();
+      if (Array.isArray(files)) {
+        for (const f of files) {
+          // path like "/index.html" or "/logo.png", sha is the hash
+          if (f.path && f.sha) existingFiles[f.path] = f.sha;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error obteniendo archivos del deploy anterior:", err.message);
+  }
+
+  // 2. Fetch current HTML
   let html;
   try {
-    const r = await fetch(`https://xoralab.com`, { signal: AbortSignal.timeout(10000) });
+    const r = await fetch("https://xoralab.com", { signal: AbortSignal.timeout(10000) });
     html = await r.text();
   } catch (err) {
     return `Error descargando la web: ${err.message}`;
   }
 
-  // 2. Replace price in HTML
-  // Matches: <div class="price-name">Pack 3 fotos</div>\n<div>...<span class="price-amount">120€</span>
+  // 3. Replace price in HTML
   const escaped = input.service_name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = new RegExp(
     `(<div class="price-name">${escaped}<\\/div>\\s*<div[^>]*>(?:<span class="price-from">desde <\\/span>)?<span class="price-amount">)[^<]+(</span>)`,
     "i"
   );
-  if (!regex.test(html)) return `No encontré el servicio "${input.service_name}" en la web. Nombres válidos: "1 vídeo", "Pack 3 vídeos", "Pack 5 vídeos", "Pack 3 fotos", "Pack 5 fotos", "Pack 8 fotos"`;
-
+  if (!regex.test(html)) {
+    return `No encontré "${input.service_name}" en la web. Nombres válidos: "1 vídeo", "Pack 3 vídeos", "Pack 5 vídeos", "Pack 3 fotos", "Pack 5 fotos", "Pack 8 fotos"`;
+  }
   html = html.replace(regex, `$1${input.new_price}€$2`);
 
-  // 3. Compute SHA1 for Netlify
-  const sha1 = createHash("sha1").update(html).digest("hex");
+  // 4. SHA1 of new HTML
+  const htmlSha = createHash("sha1").update(html).digest("hex");
 
-  // 4. Create deploy
+  // 5. Build manifest: all existing files + updated index.html
+  const fileManifest = { ...existingFiles, "/index.html": htmlSha };
+
+  // 6. Create deploy with full manifest
   let deploy;
   try {
     const r = await fetch(`https://api.netlify.com/api/v1/sites/${NETLIFY_SITE_ID}/deploys`, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${NETLIFY_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ files: { "/index.html": sha1 } })
+      headers: { ...authHeader, "Content-Type": "application/json" },
+      body: JSON.stringify({ files: fileManifest })
     });
     deploy = await r.json();
     if (!deploy.id) return `Error creando deploy: ${JSON.stringify(deploy)}`;
@@ -667,13 +697,17 @@ async function updateWebPrice(input) {
     return `Error en Netlify API: ${err.message}`;
   }
 
-  // 5. Upload file if required
-  if (deploy.required?.length > 0) {
-    await fetch(`https://api.netlify.com/api/v1/deploys/${deploy.id}/files/index.html`, {
-      method: "PUT",
-      headers: { "Authorization": `Bearer ${NETLIFY_TOKEN}`, "Content-Type": "application/octet-stream" },
-      body: html
-    });
+  // 7. Upload only what Netlify requests (only index.html, logo.png ya está en su storage)
+  if (Array.isArray(deploy.required) && deploy.required.length > 0) {
+    for (const requiredSha of deploy.required) {
+      if (requiredSha === htmlSha) {
+        await fetch(`https://api.netlify.com/api/v1/deploys/${deploy.id}/files/index.html`, {
+          method: "PUT",
+          headers: { ...authHeader, "Content-Type": "application/octet-stream" },
+          body: html
+        });
+      }
+    }
   }
 
   return `✅ Precio de "${input.service_name}" actualizado a ${input.new_price}€ en xoralab.com. La web se actualiza en unos segundos.`;
