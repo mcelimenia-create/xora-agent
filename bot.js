@@ -56,7 +56,7 @@ const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, u
 - Crea contenido visual (fotos y vídeos) con IA de calidad profesional para marcas y negocios.
 - Tienen a Enzo, su influencer IA (modelo masculino), para contenido de lifestyle, moda y producto.
 - También transforman imágenes existentes del cliente elevándolas con IA.
-- Email de XORA: xorastudio@outlook.com
+- Email de XORA: contacto@xoralab.com
 
 ## Tarifas
 - 1 vídeo: desde 200€ | Pack 3: desde 400€ | Pack 5: desde 600€
