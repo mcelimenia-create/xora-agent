@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import TelegramBot from "node-telegram-bot-api";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
+import Redis from "ioredis";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -8,11 +9,31 @@ dotenv.config();
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
-const OUTLOOK_USER = process.env.OUTLOOK_USER;
-const OUTLOOK_PASSWORD = process.env.OUTLOOK_PASSWORD;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || "Marcos de XORA <marcos@xora-studio.com>";
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID
   ? parseInt(process.env.ALLOWED_USER_ID)
   : null;
+
+// Memoria persistente con Redis (Railway)
+const redis = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
+
+const MEMORY_KEY = "xora:memory";
+
+async function loadMemory() {
+  if (!redis) return {};
+  try {
+    const data = await redis.get(MEMORY_KEY);
+    return data ? JSON.parse(data) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveMemory(memory) {
+  if (!redis) return;
+  await redis.set(MEMORY_KEY, JSON.stringify(memory));
+}
 
 if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
   console.error("Faltan TELEGRAM_TOKEN o ANTHROPIC_API_KEY en el .env");
@@ -35,7 +56,7 @@ const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, u
 - Crea contenido visual (fotos y vídeos) con IA de calidad profesional para marcas y negocios.
 - Tienen a Enzo, su influencer IA (modelo masculino), para contenido de lifestyle, moda y producto.
 - También transforman imágenes existentes del cliente elevándolas con IA.
-- Email de XORA: ${OUTLOOK_USER || "xorastudio@outlook.com"}
+- Email de XORA: xorastudio@outlook.com
 
 ## Tarifas
 - 1 vídeo: desde 200€ | Pack 3: desde 400€ | Pack 5: desde 600€
@@ -43,7 +64,6 @@ const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, u
 - Extras: derechos anuncios +30-50%, raw +50%, uso ilimitado 250€ fijo
 
 ## Herramientas disponibles
-Tienes dos herramientas:
 
 ### search_web
 Busca negocios potenciales en internet. Para cada negocio encontrado analiza:
@@ -59,6 +79,12 @@ Presenta los resultados con nombre, descripción, canal de contacto recomendado 
 - Menciona algo específico del negocio para que no parezca spam.
 - Firma siempre como Marcos, de XORA.
 - Tras usar esta herramienta, dile a Marcos que revise el email y escriba /enviar para enviarlo o /cancelar para descartarlo.
+
+### save_memory
+Guarda información importante de forma permanente. Úsala cuando Marcos te diga algo relevante sobre la agencia: nuevos clientes, proyectos, precios actualizados, preferencias, notas importantes, etc. También úsala proactivamente cuando detectes info valiosa que convenga recordar.
+
+### get_memory
+Recupera toda la información guardada. Úsala al inicio de conversaciones importantes o cuando Marcos pregunte por algo que podría estar guardado.
 
 ## Para Instagram y otras redes
 Si el contacto es por Instagram u otra red social, redacta el mensaje directamente en el chat (no uses herramienta) y díselo a Marcos para que lo envíe manualmente. El mensaje debe ser informal, breve y con gancho.
@@ -82,29 +108,46 @@ const TOOLS = [
   },
   {
     name: "prepare_email",
-    description:
-      "Prepara un email de presentación de XORA para enviarlo a un negocio potencial. El email queda pendiente de confirmación del usuario.",
+    description: "Prepara un email de presentación de XORA pendiente de confirmación.",
     input_schema: {
       type: "object",
       properties: {
-        to: {
-          type: "string",
-          description: "Email del destinatario",
-        },
-        business_name: {
-          type: "string",
-          description: "Nombre del negocio",
-        },
-        subject: {
-          type: "string",
-          description: "Asunto del email",
-        },
+        to: { type: "string", description: "Email del destinatario" },
+        business_name: { type: "string", description: "Nombre del negocio" },
+        subject: { type: "string", description: "Asunto del email" },
         body: {
           type: "string",
-          description: "Cuerpo del email en texto plano, máximo 150 palabras, profesional y personalizado",
+          description: "Cuerpo del email, máximo 150 palabras, personalizado",
         },
       },
       required: ["to", "business_name", "subject", "body"],
+    },
+  },
+  {
+    name: "save_memory",
+    description: "Guarda información importante de forma permanente (clientes, proyectos, precios, notas).",
+    input_schema: {
+      type: "object",
+      properties: {
+        key: {
+          type: "string",
+          description: "Categoría de la información, ej: 'clientes', 'proyectos', 'precios', 'notas'",
+        },
+        value: {
+          type: "string",
+          description: "Información a guardar",
+        },
+      },
+      required: ["key", "value"],
+    },
+  },
+  {
+    name: "get_memory",
+    description: "Recupera toda la información guardada permanentemente.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
     },
   },
 ];
@@ -144,26 +187,37 @@ function prepareEmail(userId, { to, business_name, subject, body }) {
 }
 
 async function sendEmail({ to, subject, body }) {
-  if (!OUTLOOK_USER || !OUTLOOK_PASSWORD) {
-    throw new Error("Falta OUTLOOK_USER o OUTLOOK_PASSWORD en el .env");
+  if (!RESEND_API_KEY) {
+    throw new Error("Falta RESEND_API_KEY en las variables de entorno");
   }
-  const transporter = nodemailer.createTransport({
-    host: "smtp-mail.outlook.com",
-    port: 587,
-    secure: false,
-    auth: { user: OUTLOOK_USER, pass: OUTLOOK_PASSWORD },
-  });
-  await transporter.sendMail({
-    from: `XORA <${OUTLOOK_USER}>`,
+  const resend = new Resend(RESEND_API_KEY);
+  const { error } = await resend.emails.send({
+    from: FROM_EMAIL,
     to,
     subject,
     text: body,
+    reply_to: process.env.REPLY_TO_EMAIL,
   });
+  if (error) throw new Error(error.message);
 }
 
 async function runTool(name, input, userId) {
   if (name === "search_web") return await searchWeb(input.query);
   if (name === "prepare_email") return prepareEmail(userId, input);
+  if (name === "save_memory") {
+    const memory = await loadMemory();
+    const existing = memory[input.key] ? memory[input.key] + "\n" : "";
+    memory[input.key] = existing + `[${new Date().toLocaleDateString("es-ES")}] ${input.value}`;
+    await saveMemory(memory);
+    return `Guardado en '${input.key}': ${input.value}`;
+  }
+  if (name === "get_memory") {
+    const memory = await loadMemory();
+    if (Object.keys(memory).length === 0) return "No hay nada guardado aún.";
+    return Object.entries(memory)
+      .map(([k, v]) => `**${k}:**\n${v}`)
+      .join("\n\n");
+  }
   return "Herramienta no reconocida.";
 }
 
@@ -266,7 +320,7 @@ bot.onText(/\/enviar/, async (msg) => {
     console.error("Error enviando email:", err.message);
     bot.sendMessage(
       msg.chat.id,
-      `❌ Error al enviar: ${err.message}\n\nRevisa OUTLOOK_USER y OUTLOOK_PASSWORD en el .env`
+      `❌ Error al enviar: ${err.message}`
     );
   }
 });
