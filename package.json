@@ -10,6 +10,8 @@
     "dotenv": "^16.4.5",
     "ioredis": "^5.10.1",
     "node-telegram-bot-api": "^0.66.0",
+    "openai": "^4.80.0",
+    "pdfkit": "^0.15.2",
     "resend": "^6.10.0"
   }
 }
