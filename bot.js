@@ -802,13 +802,49 @@ async function runTool(name, input, userId) {
 
 // ── CLAUDE LOOP ───────────────────────────────────────────
 
+async function buildSystemPrompt() {
+  // Auto-inject saved memory and CRM summary into every call
+  let extra = "";
+
+  const memory = await loadMemory();
+  if (Object.keys(memory).length > 0) {
+    extra += "\n\n## MEMORIA GUARDADA (siempre disponible)\n";
+    extra += Object.entries(memory).map(([k, v]) => `${k}:\n${v}`).join("\n\n");
+  }
+
+  const clients = await loadClients();
+  const list = Object.values(clients);
+  if (list.length > 0) {
+    const byStatus = {};
+    list.forEach(c => { byStatus[c.status] = (byStatus[c.status] || 0) + 1; });
+    const now = Date.now();
+    const needFollowup = list.filter(c =>
+      c.status === "contactado" && c.contacted_at &&
+      Math.floor((now - new Date(c.contacted_at)) / 86400000) >= 3
+    );
+    extra += `\n\n## ESTADO ACTUAL DEL CRM\n`;
+    extra += `Total contactos: ${list.length} | ` +
+      Object.entries(byStatus).map(([s, n]) => `${s}: ${n}`).join(" | ");
+    if (needFollowup.length > 0) {
+      extra += `\nSeguimientos urgentes: ${needFollowup.map(c => c.name).join(", ")}`;
+    }
+  }
+
+  const prices = await loadPrices();
+  extra += "\n\n## PRECIOS ACTUALES\n";
+  extra += Object.values(prices).map(v => `${v.label}: ${v.price}€`).join(" | ");
+
+  return SYSTEM_PROMPT + extra;
+}
+
 async function askClaude(messages, userId) {
   let current = [...messages];
+  const systemPrompt = await buildSystemPrompt();
   while (true) {
     const response = await claude.messages.create({
       model: "claude-opus-4-6",
       max_tokens: 2048,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       tools: TOOLS,
       messages: current
     });
