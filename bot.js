@@ -163,10 +163,13 @@ Genera directamente sin herramientas: posts, Reels, Stories, copies publicitario
 Usa analyze_business. Estructura: 🔍 Qué hace | 📉 Puntos débiles | 💡 Cómo ayuda XORA (con precios).
 
 ## Análisis de negocios — flujo completo
-Cuando uses analyze_business, termina SIEMPRE con:
+Cuando uses analyze_business, termina SIEMPRE con estas dos secciones:
 
 📧 **Email listo para enviar**
 Asunto + cuerpo completo. Enfocado en resultados para ese negocio concreto, no en lo que hace XORA.
+
+💬 **DM de Instagram listo para copiar**
+Máximo 4-5 líneas. Tono cercano, directo, nada de spam. Que parezca un mensaje personal, no publicidad. Sin emojis de relleno. Termina con una pregunta concreta que invite a responder.
 
 ## Análisis de competencia
 Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
@@ -837,7 +840,7 @@ async function askClaude(messages, userId) {
   while (true) {
     const response = await claude.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 1500,
+      max_tokens: 2000,
       system: systemPrompt,
       tools: TOOLS,
       messages: current
