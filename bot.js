@@ -180,13 +180,7 @@ Nombres exactos de servicios: "1 vídeo", "Pack 3 vídeos", "Pack 5 vídeos", "P
 Después de actualizar la web, usa también update_price para mantener el CRM sincronizado.
 
 ## Herramientas disponibles
-- search_web, search_businesses, search_email, analyze_business
-- prepare_email, save_client, update_client, get_clients
-- generate_proposal
-- update_price, get_prices, update_web_price
-- save_template, get_templates
-- calculate_budget
-- save_memory, get_memory
+search_web, search_businesses, search_email, analyze_business, prepare_email, save_client, update_client, get_clients, generate_proposal, update_price, update_web_price, save_template, get_templates, calculate_budget, save_memory
 
 ## Estilo de respuesta
 Sé directo y conciso. Máximo 3-4 párrafos salvo que te pidan más detalle o sea un análisis completo. Usa listas cuando estructuren mejor la información. Nunca rellenes con frases vacías.
@@ -198,30 +192,27 @@ Responde siempre en español, de forma clara y directa.`;
 const TOOLS = [
   {
     name: "search_web",
-    description: "Busca información general en internet.",
+    description: "Busca en internet.",
     input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
   },
   {
     name: "search_businesses",
-    description: "Búsqueda masiva de 10 negocios potenciales.",
+    description: "Busca negocios potenciales como clientes.",
     input_schema: {
       type: "object",
-      properties: {
-        query:  { type: "string" },
-        sector: { type: "string" }
-      },
+      properties: { query: { type: "string" }, sector: { type: "string" } },
       required: ["query", "sector"]
     }
   },
   {
     name: "analyze_business",
-    description: "Analiza una empresa: lee su web, busca su presencia en redes y detecta puntos débiles en contenido visual para proponer servicios de XORA.",
+    description: "Lee la web de una empresa, busca sus redes y detecta puntos débiles para proponer XORA.",
     input_schema: {
       type: "object",
       properties: {
-        business_name: { type: "string", description: "Nombre de la empresa" },
-        website:       { type: "string", description: "URL de su web (ej: https://ejemplo.com)" },
-        sector:        { type: "string", description: "Sector si se conoce" }
+        business_name: { type: "string" },
+        website:       { type: "string" },
+        sector:        { type: "string" }
       },
       required: ["business_name"]
     }
@@ -241,7 +232,7 @@ const TOOLS = [
   },
   {
     name: "prepare_email",
-    description: "Prepara email pendiente de confirmación.",
+    description: "Prepara un email para confirmación antes de enviar. Usa /enviar para mandarlo.",
     input_schema: {
       type: "object",
       properties: {
@@ -257,14 +248,14 @@ const TOOLS = [
   },
   {
     name: "save_client",
-    description: "Guarda un cliente o prospecto en el CRM.",
+    description: "Guarda un prospecto o cliente en el CRM.",
     input_schema: {
       type: "object",
       properties: {
         name:   { type: "string" },
         email:  { type: "string" },
         sector: { type: "string" },
-        status: { type: "string", description: "contactado | interesado | negociando | cliente | descartado" },
+        status: { type: "string", description: "contactado|interesado|negociando|cliente|descartado" },
         notes:  { type: "string" }
       },
       required: ["name", "status"]
@@ -272,7 +263,7 @@ const TOOLS = [
   },
   {
     name: "update_client",
-    description: "Actualiza estado o notas de un cliente. Si el nuevo estado es 'cliente', se enviará email de bienvenida automáticamente.",
+    description: "Actualiza estado o notas de un cliente. Estado 'cliente' envía onboarding automático.",
     input_schema: {
       type: "object",
       properties: {
@@ -285,18 +276,16 @@ const TOOLS = [
   },
   {
     name: "get_clients",
-    description: "Obtiene todos los clientes del CRM.",
+    description: "Lista clientes del CRM, opcionalmente filtrados por estado.",
     input_schema: {
       type: "object",
-      properties: {
-        status_filter: { type: "string" }
-      },
+      properties: { status_filter: { type: "string" } },
       required: []
     }
   },
   {
     name: "generate_proposal",
-    description: "Genera propuesta comercial completa.",
+    description: "Genera propuesta comercial en texto y PDF.",
     input_schema: {
       type: "object",
       properties: {
@@ -310,29 +299,36 @@ const TOOLS = [
   },
   {
     name: "update_price",
-    description: "Actualiza el precio de un servicio.",
+    description: "Actualiza el precio de un servicio en el CRM.",
     input_schema: {
       type: "object",
       properties: {
-        service_key: { type: "string", description: "ej: 1_video, pack3_videos, pack3_fotos, uso_ilimitado" },
-        price:       { type: "number", description: "Nuevo precio en euros" },
-        label:       { type: "string", description: "Nombre descriptivo del servicio" }
+        service_key: { type: "string", description: "1_video|pack3_videos|pack5_videos|pack3_fotos|pack5_fotos|pack8_fotos|uso_ilimitado" },
+        price:       { type: "number" },
+        label:       { type: "string" }
       },
       required: ["service_key", "price"]
     }
   },
   {
-    name: "get_prices",
-    description: "Obtiene la tabla de precios actualizada.",
-    input_schema: { type: "object", properties: {}, required: [] }
-  },
-  {
-    name: "save_template",
-    description: "Guarda una plantilla de email personalizada.",
+    name: "update_web_price",
+    description: "Cambia un precio en xoralab.com y redesplega en Netlify.",
     input_schema: {
       type: "object",
       properties: {
-        name:    { type: "string", description: "Nombre de la plantilla" },
+        service_name: { type: "string", description: "'1 vídeo'|'Pack 3 vídeos'|'Pack 5 vídeos'|'Pack 3 fotos'|'Pack 5 fotos'|'Pack 8 fotos'" },
+        new_price:    { type: "number" }
+      },
+      required: ["service_name", "new_price"]
+    }
+  },
+  {
+    name: "save_template",
+    description: "Guarda una plantilla de email.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name:    { type: "string" },
         sector:  { type: "string" },
         subject: { type: "string" },
         body:    { type: "string" }
@@ -342,45 +338,31 @@ const TOOLS = [
   },
   {
     name: "get_templates",
-    description: "Obtiene las plantillas de email guardadas.",
+    description: "Obtiene plantillas de email guardadas.",
     input_schema: {
       type: "object",
-      properties: {
-        sector: { type: "string", description: "Filtrar por sector (opcional)" }
-      },
+      properties: { sector: { type: "string" } },
       required: []
     }
   },
   {
-    name: "update_web_price",
-    description: "Actualiza el precio de un servicio en la web xoralab.com y redesplega automáticamente en Netlify.",
-    input_schema: {
-      type: "object",
-      properties: {
-        service_name: { type: "string", description: "Nombre exacto: '1 vídeo', 'Pack 3 vídeos', 'Pack 5 vídeos', 'Pack 3 fotos', 'Pack 5 fotos', 'Pack 8 fotos'" },
-        new_price:    { type: "number", description: "Nuevo precio en euros (sin símbolo €)" }
-      },
-      required: ["service_name", "new_price"]
-    }
-  },
-  {
     name: "calculate_budget",
-    description: "Calcula el presupuesto exacto según servicios seleccionados.",
+    description: "Calcula presupuesto exacto con extras.",
     input_schema: {
       type: "object",
       properties: {
-        videos:           { type: "number", description: "Número de vídeos (0, 1, 3 o 5)" },
-        photos:           { type: "number", description: "Número de fotos (0, 3, 5 u 8)" },
-        ad_rights:        { type: "boolean", description: "Incluir derechos de anuncios (+30-50%)" },
-        unlimited_rights: { type: "boolean", description: "Incluir uso ilimitado (+250€ fijo)" },
-        raw_files:        { type: "boolean", description: "Incluir archivos RAW (+50%)" }
+        videos:           { type: "number", description: "0,1,3,5" },
+        photos:           { type: "number", description: "0,3,5,8" },
+        ad_rights:        { type: "boolean" },
+        unlimited_rights: { type: "boolean" },
+        raw_files:        { type: "boolean" }
       },
       required: ["videos", "photos"]
     }
   },
   {
     name: "save_memory",
-    description: "Guarda información importante de forma permanente.",
+    description: "Guarda información permanente entre sesiones.",
     input_schema: {
       type: "object",
       properties: {
@@ -389,11 +371,6 @@ const TOOLS = [
       },
       required: ["key", "value"]
     }
-  },
-  {
-    name: "get_memory",
-    description: "Recupera toda la información guardada permanentemente.",
-    input_schema: { type: "object", properties: {}, required: [] }
   }
 ];
 
@@ -787,11 +764,6 @@ async function runTool(name, input, userId) {
       await saveMemory(memory);
       return `Guardado: ${input.value}`;
     }
-    case "get_memory": {
-      const memory = await loadMemory();
-      if (!Object.keys(memory).length) return "No hay nada guardado.";
-      return Object.entries(memory).map(([k, v]) => `${k}:\n${v}`).join("\n\n");
-    }
     default:
       return "Herramienta no reconocida.";
   }
@@ -799,52 +771,82 @@ async function runTool(name, input, userId) {
 
 // ── CLAUDE LOOP ───────────────────────────────────────────
 
-async function buildSystemPrompt() {
-  // Auto-inject saved memory and CRM summary into every call
+async function buildSystemPrompt(userMessage = "") {
+  const msg = userMessage.toLowerCase();
   let extra = "";
 
+  // Memoria: siempre (suele ser pequeña)
   const memory = await loadMemory();
   if (Object.keys(memory).length > 0) {
-    extra += "\n\n## MEMORIA GUARDADA (siempre disponible)\n";
-    extra += Object.entries(memory).map(([k, v]) => `${k}:\n${v}`).join("\n\n");
+    extra += "\n\n## MEMORIA\n";
+    extra += Object.entries(memory).map(([k, v]) => `${k}: ${v}`).join("\n");
   }
 
-  const clients = await loadClients();
-  const list = Object.values(clients);
-  if (list.length > 0) {
-    const byStatus = {};
-    list.forEach(c => { byStatus[c.status] = (byStatus[c.status] || 0) + 1; });
-    const now = Date.now();
-    const needFollowup = list.filter(c =>
-      c.status === "contactado" && c.contacted_at &&
-      Math.floor((now - new Date(c.contacted_at)) / 86400000) >= 3
-    );
-    extra += `\n\n## ESTADO ACTUAL DEL CRM\n`;
-    extra += `Total contactos: ${list.length} | ` +
-      Object.entries(byStatus).map(([s, n]) => `${s}: ${n}`).join(" | ");
-    if (needFollowup.length > 0) {
-      extra += `\nSeguimientos urgentes: ${needFollowup.map(c => c.name).join(", ")}`;
+  // Precios: siempre (solo 7 líneas)
+  const prices = await loadPrices();
+  extra += "\n\n## PRECIOS\n";
+  extra += Object.values(prices).map(v => `${v.label}: ${v.price}€`).join(" | ");
+
+  // CRM: solo si el mensaje es relevante o no hay mensaje (comandos)
+  const crmKeywords = ["cliente", "crm", "contacto", "seguimiento", "pipeline",
+    "prospecto", "interesado", "negociando", "email a", "enviar a", "manda"];
+  const needsCRM = !userMessage || crmKeywords.some(k => msg.includes(k));
+  if (needsCRM) {
+    const clients = await loadClients();
+    const list = Object.values(clients);
+    if (list.length > 0) {
+      const byStatus = {};
+      list.forEach(c => { byStatus[c.status] = (byStatus[c.status] || 0) + 1; });
+      const now = Date.now();
+      const needFollowup = list.filter(c =>
+        c.status === "contactado" && c.contacted_at &&
+        Math.floor((now - new Date(c.contacted_at)) / 86400000) >= 3
+      );
+      extra += `\n\n## CRM\n`;
+      extra += `Total: ${list.length} | ` +
+        Object.entries(byStatus).map(([s, n]) => `${s}: ${n}`).join(" | ");
+      if (needFollowup.length > 0) {
+        extra += `\nSeguimientos urgentes: ${needFollowup.map(c => c.name).join(", ")}`;
+      }
     }
   }
-
-  const prices = await loadPrices();
-  extra += "\n\n## PRECIOS ACTUALES\n";
-  extra += Object.values(prices).map(v => `${v.label}: ${v.price}€`).join(" | ");
 
   return SYSTEM_PROMPT + extra;
 }
 
+function compressHistory(messages) {
+  // Mantener los últimos 6 turnos intactos; en los más antiguos recortar tool results largos
+  if (messages.length <= 12) return messages;
+  return messages.map((m, i) => {
+    if (i >= messages.length - 12) return m;
+    if (Array.isArray(m.content)) {
+      const compressed = m.content.map(b => {
+        if (b.type === "tool_result" && typeof b.content === "string" && b.content.length > 200) {
+          return { ...b, content: b.content.slice(0, 200) + "…[recortado]" };
+        }
+        return b;
+      });
+      return { ...m, content: compressed };
+    }
+    return m;
+  });
+}
+
 async function askClaude(messages, userId) {
-  let current = [...messages];
-  const systemPrompt = await buildSystemPrompt();
+  let current = compressHistory([...messages]);
+  // Extraer el último mensaje del usuario para inyección condicional
+  const lastUserContent = messages.filter(m => m.role === "user").at(-1)?.content;
+  const lastUserText = typeof lastUserContent === "string" ? lastUserContent : "";
+  const systemPrompt = await buildSystemPrompt(lastUserText);
+
   while (true) {
     const response = await claude.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 2000,
-      system: systemPrompt,
+      system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
       tools: TOOLS,
       messages: current
-    });
+    }, { headers: { "anthropic-beta": "prompt-caching-2024-07-31" } });
 
     if (response.stop_reason === "end_turn" || response.stop_reason === "max_tokens") {
       const text = response.content.filter(b => b.type === "text").map(b => b.text).join("");
