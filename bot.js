@@ -4,7 +4,6 @@ import { Resend } from "resend";
 import Redis from "ioredis";
 import dotenv from "dotenv";
 import PDFDocument from "pdfkit";
-import OpenAI, { toFile } from "openai";
 import { createHash } from "crypto";
 
 dotenv.config();
@@ -13,7 +12,6 @@ const TELEGRAM_TOKEN    = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BRAVE_API_KEY     = process.env.BRAVE_API_KEY;
 const RESEND_API_KEY    = process.env.RESEND_API_KEY;
-const OPENAI_API_KEY    = process.env.OPENAI_API_KEY;
 const FROM_EMAIL        = process.env.FROM_EMAIL || "XORA <contacto@xoralab.com>";
 const SITE_URL          = process.env.SITE_URL   || "https://xoralab.com";
 const ALLOWED_USER_ID   = process.env.ALLOWED_USER_ID ? parseInt(process.env.ALLOWED_USER_ID) : null;
@@ -28,7 +26,6 @@ if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
 const claude = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const bot    = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 const redis  = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 // ── REDIS KEYS ────────────────────────────────────────────
 
@@ -991,24 +988,6 @@ async function generateProposalPDF(input) {
   });
 }
 
-// ── VOICE TRANSCRIPTION ───────────────────────────────────
-
-async function transcribeVoice(fileUrl) {
-  if (!openai) return null;
-  try {
-    const res = await fetch(fileUrl);
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const audioFile = await toFile(buffer, "audio.ogg", { type: "audio/ogg" });
-    const transcription = await openai.audio.transcriptions.create({
-      file: audioFile, model: "whisper-1", language: "es"
-    });
-    return transcription.text;
-  } catch (err) {
-    console.error("Error transcribiendo:", err.message);
-    return null;
-  }
-}
-
 // ── SCHEDULERS ────────────────────────────────────────────
 
 async function checkFollowUps() {
@@ -1120,9 +1099,7 @@ bot.onText(/\/ayuda/, (msg) => {
     `• Análisis de competencia\n` +
     `• Al analizar un negocio → puntos débiles + propuesta de servicios XORA\n\n` +
 
-    `*🎤 VOZ & 📸 FOTOS*\n` +
-    `• Audio → transcripción → respuesta automática\n` +
-    `• "Nota para [cliente]: [texto]" → guarda en CRM directamente\n` +
+    `*📸 FOTOS*\n` +
     `• Foto de un negocio → análisis y propuesta\n\n` +
 
     `*🧠 MEMORIA & CRM*\n` +
@@ -1398,50 +1375,6 @@ bot.onText(/\/cancelar/, (msg) => {
   bot.sendMessage(msg.chat.id, had ? "Email cancelado." : "No hay ningún email pendiente.");
 });
 
-// ── VOICE MESSAGES ────────────────────────────────────────
-
-bot.on("voice", async (msg) => {
-  if (!isAuthorized(msg.from.id)) return;
-  if (!openai) {
-    bot.sendMessage(msg.chat.id, "🎤 Añade OPENAI_API_KEY en Railway para activar los mensajes de voz.");
-    return;
-  }
-  await bot.sendChatAction(msg.chat.id, "typing");
-  try {
-    const file    = await bot.getFile(msg.voice.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
-    const text    = await transcribeVoice(fileUrl);
-    if (!text) { bot.sendMessage(msg.chat.id, "No pude transcribir el audio. Inténtalo de nuevo."); return; }
-
-    await bot.sendMessage(msg.chat.id, `🎤 _"${text}"_`, { parse_mode: "Markdown" });
-
-    // Detectar "nota para [cliente]: [texto]" y guardar directamente en CRM
-    const notaMatch = text.match(/^nota para ([^:]+?):\s*(.+)/i);
-    if (notaMatch) {
-      const clientName = notaMatch[1].trim();
-      const noteText   = notaMatch[2].trim();
-      const result = await updateClient({ name: clientName, notes: noteText });
-      bot.sendMessage(msg.chat.id, `📋 ${result}`);
-      return;
-    }
-
-    const userId = msg.from.id;
-    const userHistory = await getHistory(userId);
-    userHistory.push({ role: "user", content: text });
-    const { text: reply, messages } = await askClaude(userHistory, userId);
-    await persistHistory(userId, messages);
-    if (reply) {
-      const pending = pendingEmails.get(userId);
-      let finalReply = reply;
-      if (pending) finalReply += `\n\n─────────────────\n📧 EMAIL LISTO\nPara: ${pending.to}\nAsunto: ${pending.subject}\n\n${pending.body}\n─────────────────\n/enviar · /cancelar`;
-      sendLong(msg.chat.id, finalReply);
-    }
-  } catch (err) {
-    console.error("Error en voz:", err.message);
-    bot.sendMessage(msg.chat.id, "Error procesando el audio.");
-  }
-});
-
 // ── PHOTO MESSAGES ────────────────────────────────────────
 
 bot.on("photo", async (msg) => {
@@ -1516,4 +1449,4 @@ bot.on("message", async (msg) => {
   }
 });
 
-console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | presupuestos ✓`);
+console.log("Bot XORA iniciado — visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | presupuestos ✓");
