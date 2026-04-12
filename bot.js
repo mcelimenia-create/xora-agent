@@ -855,16 +855,16 @@ async function askClaude(messages, userId) {
   while (true) {
     const response = await claude.messages.create({
       model: "claude-opus-4-6",
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: systemPrompt,
       tools: TOOLS,
       messages: current
     });
 
-    if (response.stop_reason === "end_turn") {
+    if (response.stop_reason === "end_turn" || response.stop_reason === "max_tokens") {
       const text = response.content.filter(b => b.type === "text").map(b => b.text).join("");
       current.push({ role: "assistant", content: response.content });
-      return { text, messages: current };
+      return { text: text || "Sin respuesta.", messages: current };
     }
 
     if (response.stop_reason === "tool_use") {
