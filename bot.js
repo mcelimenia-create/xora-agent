@@ -177,15 +177,6 @@ Estructura siempre el análisis así:
 💡 **Cómo puede ayudar XORA** — servicios específicos con precio orientativo
 📧 **Ángulo de contacto** — el hook perfecto para el email de presentación
 
-## Análisis de negocios — flujo completo
-Cuando uses analyze_business, SIEMPRE termina tu respuesta con estas dos secciones adicionales:
-
-📸 **Caption de Instagram listo**
-Un caption real listo para publicar dirigido a ese tipo de cliente. Con gancho, cuerpo de 2-3 líneas y CTA. Incluye 5 hashtags.
-
-📧 **Email de presentación listo**
-Asunto + cuerpo completo del email, listo para copiar y enviar. Enfocado en resultados, no en lo que hace XORA.
-
 ## Análisis de competencia
 Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
 
@@ -1131,7 +1122,7 @@ bot.onText(/\/ayuda/, (msg) => {
     `• Posts, Reels, Stories, copies publicitarios\n` +
     `• Calendarios editoriales mensuales\n` +
     `• Análisis de competencia\n` +
-    `• Al analizar un negocio → caption de Instagram + email listos automáticamente\n\n` +
+    `• Al analizar un negocio → puntos débiles + propuesta de servicios XORA\n\n` +
 
     `*🎤 VOZ & 📸 FOTOS*\n` +
     `• Audio → transcripción → respuesta automática\n` +
