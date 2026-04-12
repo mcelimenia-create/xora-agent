@@ -177,6 +177,15 @@ Estructura siempre el análisis así:
 💡 **Cómo puede ayudar XORA** — servicios específicos con precio orientativo
 📧 **Ángulo de contacto** — el hook perfecto para el email de presentación
 
+## Análisis de negocios — flujo completo
+Cuando uses analyze_business, SIEMPRE termina tu respuesta con estas dos secciones adicionales:
+
+📸 **Caption de Instagram listo**
+Un caption real listo para publicar dirigido a ese tipo de cliente. Con gancho, cuerpo de 2-3 líneas y CTA. Incluye 5 hashtags.
+
+📧 **Email de presentación listo**
+Asunto + cuerpo completo del email, listo para copiar y enviar. Enfocado en resultados, no en lo que hace XORA.
+
 ## Análisis de competencia
 Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
 
@@ -193,6 +202,9 @@ Después de actualizar la web, usa también update_price para mantener el CRM si
 - save_template, get_templates
 - calculate_budget
 - save_memory, get_memory
+
+## Estilo de respuesta
+Sé directo y conciso. Máximo 3-4 párrafos salvo que te pidan más detalle o sea un análisis completo. Usa listas cuando estructuren mejor la información. Nunca rellenes con frases vacías.
 
 Responde siempre en español, de forma clara y directa.`;
 
@@ -1081,8 +1093,9 @@ bot.onText(/\/ayuda/, (msg) => {
 
     `*📋 COMANDOS*\n` +
     `/clientes — CRM completo\n` +
-    `/stats — tasa de conversión, respuesta y pipeline\n` +
-    `/pipeline — vista del embudo de ventas con días\n` +
+    `/clientes [nombre] — ficha detallada con historial completo\n` +
+    `/stats — conversión, respuesta, valor del pipeline y revenue\n` +
+    `/pipeline — embudo de ventas con días por etapa\n` +
     `/seguimiento — clientes sin respuesta hace +3 días\n` +
     `/exportar — descarga el CRM en CSV\n` +
     `/precios — ver y editar tarifas\n` +
@@ -1117,10 +1130,12 @@ bot.onText(/\/ayuda/, (msg) => {
     `*📱 CONTENIDO*\n` +
     `• Posts, Reels, Stories, copies publicitarios\n` +
     `• Calendarios editoriales mensuales\n` +
-    `• Análisis de competencia\n\n` +
+    `• Análisis de competencia\n` +
+    `• Al analizar un negocio → caption de Instagram + email listos automáticamente\n\n` +
 
     `*🎤 VOZ & 📸 FOTOS*\n` +
     `• Audio → transcripción → respuesta automática\n` +
+    `• "Nota para [cliente]: [texto]" → guarda en CRM directamente\n` +
     `• Foto de un negocio → análisis y propuesta\n\n` +
 
     `*🧠 MEMORIA & CRM*\n` +
@@ -1147,10 +1162,44 @@ bot.onText(/\/reset/, async (msg) => {
   bot.sendMessage(msg.chat.id, "Conversación reiniciada.");
 });
 
-bot.onText(/\/clientes/, async (msg) => {
+bot.onText(/\/clientes(?:\s+(.+))?/, async (msg, match) => {
   if (!isAuthorized(msg.from.id)) return;
   await bot.sendChatAction(msg.chat.id, "typing");
   const clients = await loadClients();
+
+  // Si se pasa nombre, mostrar ficha detallada del cliente
+  const search = match?.[1]?.trim();
+  if (search) {
+    const found = Object.values(clients).find(c =>
+      c.name.toLowerCase().includes(search.toLowerCase())
+    );
+    if (!found) {
+      bot.sendMessage(msg.chat.id, `No encontré ningún cliente llamado "${search}".`);
+      return;
+    }
+    const now = Date.now();
+    const daysInPipeline = found.contacted_at
+      ? Math.floor((now - new Date(found.contacted_at)) / 86400000)
+      : null;
+    const daysSinceUpdate = found.updated_at
+      ? Math.floor((now - new Date(found.updated_at)) / 86400000)
+      : null;
+    const detail =
+      `👤 *${found.name}*\n\n` +
+      `Estado: *${found.status.toUpperCase()}*\n` +
+      `Email: ${found.email || "—"}\n` +
+      `Sector: ${found.sector || "—"}\n` +
+      `En pipeline: ${daysInPipeline !== null ? `${daysInPipeline} días` : "—"}\n` +
+      `Última actualización: ${daysSinceUpdate !== null ? `hace ${daysSinceUpdate} días` : "—"}\n` +
+      `Contactado: ${found.contacted_at ? new Date(found.contacted_at).toLocaleDateString("es-ES") : "—"}\n` +
+      `Cerrado: ${found.closed_at ? new Date(found.closed_at).toLocaleDateString("es-ES") : "—"}\n` +
+      `Onboarding enviado: ${found.onboarding_sent ? "Sí" : "No"}\n\n` +
+      `📝 *Notas:*\n${found.notes || "Sin notas aún"}`;
+    bot.sendMessage(msg.chat.id, detail, { parse_mode: "Markdown" });
+    return;
+  }
+
+  // Sin argumento: listar todos
   const list = Object.values(clients);
   const stats = {
     contactado: list.filter(c => c.status === "contactado").length,
@@ -1198,6 +1247,16 @@ bot.onText(/\/stats/, async (msg) => {
     return Math.floor((now - new Date(c.contacted_at)) / 86400000) >= 3;
   }).length;
 
+  // Pipeline value: avg ticket × clients in interesado + negociando
+  const prices = await loadPrices();
+  const priceValues = Object.values(prices).map(p => p.price);
+  const avgTicket = Math.round(priceValues.reduce((s, p) => s + p, 0) / priceValues.length);
+  const pipelineCount = byStatus.interesado + byStatus.negociando;
+  const pipelineValue = pipelineCount * avgTicket;
+
+  // Revenue from closed clients (estimated)
+  const revenueEstimated = byStatus.cliente * avgTicket;
+
   bot.sendMessage(msg.chat.id,
     `📈 ESTADÍSTICAS XORA\n\n` +
     `Total contactos: ${total}\n` +
@@ -1210,6 +1269,8 @@ bot.onText(/\/stats/, async (msg) => {
     `  🤝 Negociando: ${byStatus.negociando}\n` +
     `  ✅ Clientes: ${byStatus.cliente}\n` +
     `  ❌ Descartados: ${byStatus.descartado}\n\n` +
+    `💰 Valor del pipeline: ~${pipelineValue}€ (${pipelineCount} oportunidades × ${avgTicket}€ ticket medio)\n` +
+    `💵 Ingresos estimados: ~${revenueEstimated}€ (${byStatus.cliente} clientes)\n\n` +
     `Por sector:\n${sectorLines || "  Sin datos"}\n\n` +
     `⏰ Seguimientos pendientes: ${pendingFU}`
   );
@@ -1366,6 +1427,16 @@ bot.on("voice", async (msg) => {
     if (!text) { bot.sendMessage(msg.chat.id, "No pude transcribir el audio. Inténtalo de nuevo."); return; }
 
     await bot.sendMessage(msg.chat.id, `🎤 _"${text}"_`, { parse_mode: "Markdown" });
+
+    // Detectar "nota para [cliente]: [texto]" y guardar directamente en CRM
+    const notaMatch = text.match(/^nota para ([^:]+?):\s*(.+)/i);
+    if (notaMatch) {
+      const clientName = notaMatch[1].trim();
+      const noteText   = notaMatch[2].trim();
+      const result = await updateClient({ name: clientName, notes: noteText });
+      bot.sendMessage(msg.chat.id, `📋 ${result}`);
+      return;
+    }
 
     const userId = msg.from.id;
     const userHistory = await getHistory(userId);
