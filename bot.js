@@ -90,7 +90,7 @@ async function saveClients(data) {
 // ── CONVERSATION HISTORY ──────────────────────────────────
 
 const history = new Map();
-const MAX_HISTORY = 40;
+const MAX_HISTORY = 15;
 
 async function getHistory(userId) {
   if (!history.has(userId)) {
@@ -157,25 +157,16 @@ Sectores base: gimnasio, moda, restaurante, ecommerce, default.
 - Usa save_client / update_client / get_clients para gestionar.
 
 ## Contenido para redes sociales
-Genera directamente sin herramientas:
-- Post Instagram: gancho + cuerpo (3-4 líneas) + CTA + 5 hashtags
-- Guión Reel: intro gancho (3s) + escenas con texto en pantalla + voz en off + CTA
-- Stories: 3-5 slides, texto corto e impactante
-- Copy publicitario: headline + descripción + CTA
-- Calendario editorial: tabla por semanas con fecha, formato, tema y caption
+Genera directamente sin herramientas: posts, Reels, Stories, copies publicitarios, calendarios editoriales.
 
 ## Análisis de negocios
-Cuando Marcos pase el nombre y/o web de una empresa, usa analyze_business para:
-1. Leer el contenido real de su web
-2. Buscar su presencia en redes sociales
-3. Identificar sus puntos débiles en contenido visual
-4. Proponer servicios concretos de XORA que les vendrían bien
+Usa analyze_business. Estructura: 🔍 Qué hace | 📉 Puntos débiles | 💡 Cómo ayuda XORA (con precios).
 
-Estructura siempre el análisis así:
-🔍 **Qué hace [empresa]** — resumen breve
-📉 **Puntos débiles detectados** — lista concreta (fotos de baja calidad, sin vídeo, sin presencia en Instagram, fotos genéricas de stock, etc.)
-💡 **Cómo puede ayudar XORA** — servicios específicos con precio orientativo
-📧 **Ángulo de contacto** — el hook perfecto para el email de presentación
+## Análisis de negocios — flujo completo
+Cuando uses analyze_business, termina SIEMPRE con:
+
+📧 **Email listo para enviar**
+Asunto + cuerpo completo. Enfocado en resultados para ese negocio concreto, no en lo que hace XORA.
 
 ## Análisis de competencia
 Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
@@ -845,8 +836,8 @@ async function askClaude(messages, userId) {
   const systemPrompt = await buildSystemPrompt();
   while (true) {
     const response = await claude.messages.create({
-      model: "claude-opus-4-6",
-      max_tokens: 4096,
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1500,
       system: systemPrompt,
       tools: TOOLS,
       messages: current
