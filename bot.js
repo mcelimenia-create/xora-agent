@@ -5,19 +5,21 @@ import Redis from "ioredis";
 import dotenv from "dotenv";
 import PDFDocument from "pdfkit";
 import OpenAI, { toFile } from "openai";
-import { createHash } from "crypto";
+
 
 dotenv.config();
 
-const TELEGRAM_TOKEN    = process.env.TELEGRAM_TOKEN;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const BRAVE_API_KEY     = process.env.BRAVE_API_KEY;
-const RESEND_API_KEY    = process.env.RESEND_API_KEY;
-const OPENAI_API_KEY    = process.env.OPENAI_API_KEY;
-const FROM_EMAIL        = process.env.FROM_EMAIL || "XORA <contacto@xoralab.com>";
-const SITE_URL          = process.env.SITE_URL   || "https://xoralab.com";
-const ALLOWED_USER_ID   = process.env.ALLOWED_USER_ID ? parseInt(process.env.ALLOWED_USER_ID) : null;
-const AUTO_FOLLOWUP     = process.env.AUTO_FOLLOWUP === "true";
+const TELEGRAM_TOKEN     = process.env.TELEGRAM_TOKEN;
+const ANTHROPIC_API_KEY  = process.env.ANTHROPIC_API_KEY;
+const BRAVE_API_KEY      = process.env.BRAVE_API_KEY;
+const RESEND_API_KEY     = process.env.RESEND_API_KEY;
+const OPENAI_API_KEY     = process.env.OPENAI_API_KEY;
+const GOOGLE_PLACES_KEY  = process.env.GOOGLE_PLACES_KEY;
+const HUNTER_API_KEY     = process.env.HUNTER_API_KEY;
+const FROM_EMAIL         = process.env.FROM_EMAIL || "XORA <contacto@xoralab.com>";
+const SITE_URL           = process.env.SITE_URL   || "https://xoralab.com";
+const ALLOWED_USER_ID    = process.env.ALLOWED_USER_ID ? parseInt(process.env.ALLOWED_USER_ID) : null;
+const AUTO_FOLLOWUP      = process.env.AUTO_FOLLOWUP === "true";
 const AUTO_FOLLOWUP_DAYS = parseInt(process.env.AUTO_FOLLOWUP_DAYS || "5");
 
 if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
@@ -40,20 +42,22 @@ const TEMPLATES_KEY     = "xora:templates";
 // ── PRICE HELPERS ─────────────────────────────────────────
 
 const DEFAULT_PRICES = {
-  "1_video":        { price: 200, label: "1 vídeo" },
-  "pack3_videos":   { price: 400, label: "Pack 3 vídeos" },
-  "pack5_videos":   { price: 600, label: "Pack 5 vídeos" },
-  "pack3_fotos":    { price: 120, label: "Pack 3 fotos" },
-  "pack5_fotos":    { price: 190, label: "Pack 5 fotos" },
-  "pack8_fotos":    { price: 300, label: "Pack 8 fotos" },
-  "uso_ilimitado":  { price: 250, label: "Uso ilimitado (fijo)" }
+  "1_video":       { price: 499,  price_usd: 599,  label: "1 vídeo" },
+  "pack3_videos":  { price: 1199, price_usd: 1399, label: "Pack 3 vídeos" },
+  "campana_fotos": { price: 299,  price_usd: 349,  label: "Campaña de fotos (máx. 20 fotos)" }
 };
 
 async function loadPrices() {
   if (!redis) return { ...DEFAULT_PRICES };
   try {
     const saved = JSON.parse(await redis.get(PRICES_KEY) || "{}");
-    return { ...DEFAULT_PRICES, ...saved };
+    // Solo aplicar overrides de Redis para keys que existen en DEFAULT_PRICES
+    // (evita que precios viejos como pack5_videos aparezcan)
+    const filtered = {};
+    for (const key of Object.keys(DEFAULT_PRICES)) {
+      if (saved[key]) filtered[key] = { ...DEFAULT_PRICES[key], ...saved[key] };
+    }
+    return { ...DEFAULT_PRICES, ...filtered };
   } catch { return { ...DEFAULT_PRICES }; }
 }
 async function savePricesData(data) {
@@ -126,64 +130,213 @@ async function persistHistory(userId, messages) {
 
 const pendingEmails = new Map();
 
+// ── PROSPECT QUEUE ────────────────────────────────────────
+// { items: [{name, website, sector, instagram, score}], index: 0 }
+
+const prospectQueues = new Map();
+
 // ── SYSTEM PROMPT ─────────────────────────────────────────
 
-const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, una agencia de contenido con IA especializada en creación de fotos y vídeos para marcas.
+const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, una agencia de contenido visual con IA para marcas y negocios.
+
+## REGLAS FUNDAMENTALES
+1. NUNCA preguntes a Marcos qué hace XORA ni quiénes son sus clientes. Ya lo sabes. Actúa directamente.
+2. SIEMPRE llama a prepare_email con el email completo. La herramienta ya muestra automáticamente la vista previa en español para que Marcos lo revise. NO escribas el email como texto — llama al tool y deja que él lo muestre.
+3. Si el email se envía en inglés: rellena body_es y subject_es con la versión en español para que Marcos la entienda.
+4. Después de llamar a prepare_email NO repitas el contenido del email en tu respuesta de texto — el tool ya lo ha mostrado.
 
 ## Sobre XORA
-- Crea contenido visual (fotos y vídeos) con IA de calidad profesional.
-- Tienen a Enzo, su influencer IA masculino, para lifestyle, moda y producto.
-- Email: contacto@xoralab.com | Web: ${SITE_URL}
+XORA es una agencia de contenido visual con IA fundada por Marcos. Crea fotos y vídeos de calidad profesional usando inteligencia artificial, a una fracción del coste y tiempo de una producción tradicional. El cliente recibe el contenido listo para publicar en redes sociales (Instagram, TikTok, web).
 
-## Precios (usa get_prices para ver los actuales, update_price para modificar)
-Los precios son dinámicos y pueden cambiar. Consulta siempre get_prices antes de calcular o presupuestar.
-Para calcular presupuestos usa la herramienta calculate_budget.
+**Figura estrella:** Enzo (@enzowalkerr en Instagram), el influencer masculino virtual de XORA. Aparece en fotos y vídeos de lifestyle, moda masculina, deporte y producto. Cara y cuerpo realistas, adaptable a cualquier estética de marca.
 
-## Regla de oro para todos los emails
-Los emails NO son sobre lo que hace XORA — son sobre lo que el cliente va a conseguir.
-Siempre incluir:
-1. El resultado real que van a lograr (más clientes, más ventas, más seguidores, más reservas)
-2. Que hoy en día las redes sociales y el contenido visual bien hecho genera muchísimos clientes nuevos y da valor a la empresa
-3. Que si te contratan, tu contenido les va a repercutir directamente en números
-Ejemplo: en vez de "creamos fotos con IA", escribir "con el contenido visual adecuado, empresas como la tuya consiguen un 30-40% más de interacciones y captan nuevos clientes desde Instagram cada semana".
+**Importante sobre Enzo y el género:**
+- Enzo es un chico. Es ideal para marcas de moda masculina, fitness, lifestyle, producto neutro.
+- Para marcas de moda FEMENINA: NO ofrecer Enzo como modelo. En su lugar, ofrecer la opción de que el cliente mande sus propias fotos/modelos y XORA las trata con IA para elevar la calidad visual.
+- Cuando no está claro si la marca es femenina o masculina, ofrecer AMBAS opciones: usar a Enzo O enviar sus propias fotos.
+
+**Dos modalidades de trabajo (mencionarlas siempre en el email):**
+1. Con Enzo: XORA crea el contenido completo con el influencer virtual
+2. Con sus propias fotos: el cliente manda sus fotos/modelos y XORA las eleva con IA (más info en xoralab.com)
+
+**Clientes ideales de XORA** (ya lo sabes, no lo preguntes):
+- Marcas de moda masculina → Enzo encaja perfecto
+- Marcas de moda femenina → opción de enviar sus propias fotos
+- Marcas mixtas/neutras → ofrecer ambas opciones
+- Gimnasios boutique, entrenadores personales, centros fitness
+- Restaurantes, cafeterías, bares con presencia en Instagram
+- Ecommerce de cualquier producto físico
+- Clínicas de belleza, estética, peluquerías
+- Inmobiliarias y agencias de lujo
+
+**Diferenciadores clave de XORA:**
+- Producción 10× más rápida que una sesión fotográfica real
+- Sin modelos, fotógrafos ni localizaciones — solo brief y entrega
+- Contenido ilimitado y escalable para campañas de cualquier volumen
+- Derechos de uso incluidos para redes sociales
+
+Email: contacto@xoralab.com | Web: ${SITE_URL}
+
+## Servicios y precios
+Tres servicios. Precios fijos (no preguntes, ya los sabes):
+- **1 vídeo**: 499€ / $599
+- **Pack 3 vídeos**: 1.199€ / $1.399
+- **Campaña de fotos** (máx. 20 fotos): 299€ / $349
+
+Usa siempre el precio en € para clientes de España/Europa y $ para clientes de EEUU/UK/Latinoamérica anglófona.
+Para calcular presupuestos usa calculate_budget. Para actualizar precios en la web usa update_web_price + update_price.
+
+**Tiempos de entrega** (para cuando Marcos pregunte, NO para los emails):
+- 1 vídeo: 14 días
+- Pack de fotos: 7 días
+
+**REGLAS IMPORTANTES para los emails de prospección — sin excepciones:**
+- NUNCA incluyas precios ni tiempos de entrega.
+- NUNCA ofrezcas enviar ejemplos de contenido en el email. Los ejemplos ya están en xoralab.com — dirige ahí al cliente.
+El objetivo del email es que visiten xoralab.com. Precios, tiempos y ejemplos se gestionan después. Si el cliente pregunta directamente, entonces sí responde.
+
+## Estructura OBLIGATORIA de todos los emails de prospección
+Cada email que redactes DEBE seguir exactamente este orden. Sin excepciones.
+
+**0. Asunto — personalizado y con gancho**
+NUNCA usar asuntos genéricos como "Colaboración" o "Propuesta XORA".
+El asunto debe mencionar algo específico del negocio y generar curiosidad. Ejemplos:
+- "Una idea para el Instagram de [Nombre negocio]"
+- "[Nombre negocio] — esto podría duplicar tu engagement"
+- "Vi tu perfil de Instagram, [Nombre negocio]"
+- "Contenido que vende para [Nombre negocio]"
+
+**1. Saludo personalizado**
+Dirigido al nombre del responsable si se conoce, o al nombre del negocio si no. Nunca "Hola," a secas.
+Ej: "Hola María," o "Hola equipo de [Nombre negocio],"
+
+**2. Análisis breve de su empresa (2-3 frases)**
+Demuestra que conoces su negocio específicamente. Menciona algo real de su web o Instagram.
+Ej: "He visto vuestro perfil de Instagram — tenéis buen producto pero las fotos parecen hechas con móvil y se pierden entre la competencia."
+
+**3. Cómo XORA les ayuda + cifras + modalidad correcta según el género de la marca**
+Cifras a usar:
+- Marcas con contenido visual profesional consiguen un 40-60% más de interacciones
+- Coste de una sesión fotográfica tradicional (500-2.000€) frente a XORA (desde 299€)
+- Negocios con contenido consistente generan hasta un 3× más de visitas al perfil
+- El 78% de los consumidores decide comprar según el contenido visual de una marca
+
+Según el tipo de marca adapta el mensaje:
+- Moda MASCULINA o fitness: menciona a Enzo (@enzowalkerr) como el modelo virtual y que se puede ver en xoralab.com
+- Moda FEMENINA: NO menciones a Enzo. Di que pueden mandar sus propias fotos o modelos y XORA las eleva con IA. Más info en xoralab.com
+- Marca MIXTA o producto neutro: ofrece ambas opciones (Enzo o fotos propias)
+
+**4. Llamada a la acción — una sola, concreta**
+Debe invitar a visitar xoralab.com para ver los ejemplos. NUNCA ofrecer enviar ni mostrar un ejemplo personalizado — los ejemplos ya están en la web.
+Ej: "Si te interesa, puedes ver ejemplos reales en xoralab.com — y si quieres hablarlo, aquí estoy."
+Ej: "Echa un vistazo a lo que hacemos en xoralab.com — creo que te va a gustar."
+
+**5. Firma — SIEMPRE exactamente así:**
+Marcos
+Xora - Agencia de contenido con IA
+xoralab.com | contacto@xoralab.com
 
 ## Plantillas de email
 Usa get_templates para ver plantillas guardadas. Usa save_template para guardar nuevas.
-Sectores base: gimnasio, moda, restaurante, ecommerce, default.
+Sectores: gimnasio, moda, restaurante, ecommerce, belleza, inmobiliaria, default.
 
 ## CRM
 - Estados: "contactado", "interesado", "negociando", "cliente", "descartado"
-- Cuando el estado pase a "cliente", se enviará un email de bienvenida automáticamente.
+- Al pasar a "cliente" → email de bienvenida automático.
 - Usa save_client / update_client / get_clients para gestionar.
+
+## Idioma por cliente — regla crítica
+Cada cliente tiene un campo "language" en el CRM: "es" (español) o "en" (inglés).
+- Si el negocio está en EEUU, UK, Australia, Canadá, Irlanda → language: "en"
+- Si está en España, México, Latinoamérica → language: "es"
+- Al guardar un cliente nuevo con save_client, SIEMPRE asigna el idioma correcto según su país.
+- Al redactar un email o propuesta, consulta SIEMPRE el idioma del cliente y escribe el contenido en ese idioma.
+- Si Marcos dice "manda el email en inglés" → usa inglés y actualiza el idioma del cliente a "en".
+
+## Búsqueda de negocios — flujo en lote (NUEVO)
+
+**Cuando Marcos diga "busca X empresas":**
+1. Actúa DIRECTAMENTE. Sin preguntar nada.
+2. Usa search_businesses para buscarlas.
+3. Para cada resultado haz una puntuación rápida (lead score) solo con la info del search — NO hagas analyze_business aquí todavía.
+4. Llama a save_prospect_list con la lista completa ordenada por score.
+5. Muestra la lista numerada con este formato por empresa:
+   "N. Nombre — Score: X/10 — @instagram (si se encontró) — web (si se tiene)"
+6. Di: "Lista guardada. Di 'empieza' para analizar la primera."
+
+**Cuando Marcos diga "empieza", "siguiente" o "empieza con la primera/siguiente":**
+1. Toma el primer/siguiente prospecto de la cola.
+2. Usa analyze_business para analizarlo en profundidad.
+3. Busca el email de contacto. Si NO se encuentra ningún email → salta esta empresa automáticamente, avisa a Marcos ("No encontré email para X, paso a la siguiente") y analiza la siguiente.
+4. Si SÍ hay email → llama a prepare_email UNA SOLA VEZ con el email completo. Solo un email, nunca varios.
+5. Muestra el análisis + el email en español (ya preparado) + DM con @handle.
+6. **PARA AQUÍ. No analices la siguiente empresa. Espera a que Marcos pulse /enviar o /saltar.**
+7. El sistema avanza automáticamente tras cada /enviar.
+
+**REGLA CRÍTICA — UNA EMPRESA POR TURNO:**
+Cada vez que se te pide analizar una empresa, analiza ESA empresa y ninguna más. Aunque el historial tenga análisis de otras empresas anteriores, cada petición "Analiza [empresa]" es independiente. Llama a analyze_business, busca email, llama a prepare_email, y PARA. No sigas con la siguiente.
+
+**Comandos disponibles tras mostrar cada empresa:**
+- /enviar → envía el email y pasa automáticamente a la siguiente
+- /saltar → salta esta empresa y pasa a la siguiente
+- /cancelar → cancela sin avanzar
+
+Si Marcos da nombres sin webs → usa search_email para encontrar su contacto.
+
+## Análisis de negocios — flujo completo
+Antes de analizar en profundidad, puntúa el lead del 1 al 10 según estos criterios:
+- ¿Tiene Instagram activo y con publicaciones recientes? (+3)
+- ¿Su contenido visual actual es mejorable (fotos de móvil, sin coherencia)? (+2)
+- ¿Tiene web o tienda online? (+2)
+- ¿Es un sector donde XORA tiene impacto directo (moda, fitness, restauración, ecommerce, belleza)? (+2)
+- ¿Se ha encontrado email o contacto directo? (+1)
+
+Muestra la puntuación así: "📊 Lead score: 7/10" con una línea breve de justificación.
+Si el score es menor de 5, avisa a Marcos: "Lead poco cualificado, ¿continúo igualmente?"
+Si es 5 o más, procede directamente con el análisis completo.
+
+Estructura del análisis:
+🔍 Qué hace | 📉 Puntos débiles en contenido visual | 👤 Responsable/decisor encontrado | 💡 Cómo ayuda XORA (con precios)
+
+Termina SIEMPRE con estas dos secciones:
+
+📧 **EMAIL — vista previa en español**
+Muestra SIEMPRE el email en español para que Marcos lo entienda, independientemente del idioma en que se vaya a enviar. Indica al final: "(se enviará en [idioma] al ejecutar /enviar)".
+Dirígelo al responsable/decisor encontrado si lo hay — no al email genérico.
+Sigue la estructura obligatoria: asunto con gancho → saludo → análisis → mejora con cifras + Enzo + xoralab.com → llamada a la acción → firma exacta.
+
+📱 **DM de Instagram — desde la cuenta de Enzo**
+Indica SIEMPRE el @handle de Instagram del negocio al que hay que enviar el DM, así:
+"Enviar a: @handle_del_negocio"
+Si no se encontró el handle exacto, indica: "Handle no encontrado — búscalo manualmente"
+
+El mensaje:
+- Primera persona como si fuera Enzo (influencer/creador real, no agencia)
+- Tono humano, cercano, casual — máximo 4-5 líneas, sin emojis de relleno
+- NO mencionar que es una agencia — que lo descubran al entrar a la web
+- Termina con pregunta o invitación a ver xoralab.com
+- Si la marca es FEMENINA: Enzo puede igualmente enviar el DM desde su cuenta, pero el mensaje debe enfocarse en "trabajo con marcas para mejorar su contenido visual" sin mencionar que es el modelo
+- Si la marca es MASCULINA o fitness: puede mencionar que trabaja como modelo/creador de contenido para marcas
+
+Ej moda masculina: "Hola! Vi tu marca y me encaja mucho tu estilo. Trabajo creando contenido visual para marcas y creo que podría quedar muy bien juntos. Si tienes curiosidad echa un vistazo → xoralab.com ¿Te interesa?"
+Ej moda femenina: "Hola! Vi vuestro perfil y me parece que tenéis un producto muy bueno pero creo que el contenido visual podría llevaros mucho más lejos. Llevo tiempo colaborando con marcas en esto. Si queréis echar un vistazo → xoralab.com"
+
+## Análisis de competencia
+Usa search_web para buscar web/Instagram del competidor. Analiza: tipo de contenido, frecuencia, qué funciona, cómo diferenciarse desde XORA.
+
+## Actualizar precios en la web
+Cuando Marcos pida cambiar un precio en la web, usa update_web_price.
+Nombres exactos de servicios: "1 vídeo", "Pack 3 vídeos", "Campaña de fotos".
+Después usa también update_price para mantener el CRM sincronizado.
 
 ## Contenido para redes sociales
 Genera directamente sin herramientas: posts, Reels, Stories, copies publicitarios, calendarios editoriales.
 
-## Análisis de negocios
-Usa analyze_business. Estructura: 🔍 Qué hace | 📉 Puntos débiles | 💡 Cómo ayuda XORA (con precios).
-
-## Análisis de negocios — flujo completo
-Cuando uses analyze_business, termina SIEMPRE con estas dos secciones:
-
-📧 **Email listo para enviar**
-Asunto + cuerpo completo. Enfocado en resultados para ese negocio concreto, no en lo que hace XORA.
-
-💬 **DM de Instagram listo para copiar**
-Máximo 4-5 líneas. Tono cercano, directo, nada de spam. Que parezca un mensaje personal, no publicidad. Sin emojis de relleno. Termina con una pregunta concreta que invite a responder.
-
-## Análisis de competencia
-Cuando Marcos pida analizar a un competidor, usa search_web para buscar su web/Instagram y luego analiza: qué tipo de contenido hace, con qué frecuencia, qué funciona, y cómo diferenciarse desde XORA.
-
-## Actualizar precios en la web
-Cuando Marcos pida cambiar un precio en la web, usa update_web_price.
-Nombres exactos de servicios: "1 vídeo", "Pack 3 vídeos", "Pack 5 vídeos", "Pack 3 fotos", "Pack 5 fotos", "Pack 8 fotos".
-Después de actualizar la web, usa también update_price para mantener el CRM sincronizado.
-
 ## Herramientas disponibles
-search_web, search_businesses, search_email, analyze_business, prepare_email, save_client, update_client, get_clients, generate_proposal, update_price, update_web_price, save_template, get_templates, calculate_budget, save_memory
+search_web, search_businesses (Google Maps + anti-duplicados), search_email (Hunter.io), analyze_business (Instagram incluido), prepare_email, save_client (con language), update_client (con language), get_clients, generate_proposal (es/en), update_price, update_web_price, save_template (con language), get_templates (filtro language), calculate_budget, save_memory
 
 ## Estilo de respuesta
-Sé directo y conciso. Máximo 3-4 párrafos salvo que te pidan más detalle o sea un análisis completo. Usa listas cuando estructuren mejor la información. Nunca rellenes con frases vacías.
+Sé directo y conciso. Máximo 3-4 párrafos salvo análisis completo. Usa listas cuando estructuren mejor la información. Sin frases de relleno.
 
 Responde siempre en español, de forma clara y directa.`;
 
@@ -197,10 +350,13 @@ const TOOLS = [
   },
   {
     name: "search_businesses",
-    description: "Busca negocios potenciales como clientes.",
+    description: "Busca negocios potenciales como clientes de XORA. Incluye siempre ciudad en el query (ej: 'gimnasios boutique Madrid', 'tiendas ropa Barcelona'). Devuelve webs e info de contacto para analizar y contactar.",
     input_schema: {
       type: "object",
-      properties: { query: { type: "string" }, sector: { type: "string" } },
+      properties: {
+        query: { type: "string", description: "Tipo de negocio + ciudad. Ej: 'gimnasios Madrid', 'tiendas de ropa Barcelona', 'restaurantes veganos Valencia'" },
+        sector: { type: "string", description: "gimnasio|moda|restaurante|ecommerce|belleza|inmobiliaria" }
+      },
       required: ["query", "sector"]
     }
   },
@@ -232,14 +388,17 @@ const TOOLS = [
   },
   {
     name: "prepare_email",
-    description: "Prepara un email para confirmación antes de enviar. Usa /enviar para mandarlo.",
+    description: "OBLIGATORIO llamar siempre antes de mostrar un email. Guarda el email para enviarlo con /enviar y devuelve la vista previa en español para que Marcos lo revise. NUNCA muestres un email como texto sin llamar primero a esta herramienta.",
     input_schema: {
       type: "object",
       properties: {
-        to:              { type: "string" },
+        to:              { type: "string", description: "Email del destinatario" },
         business_name:   { type: "string" },
-        subject:         { type: "string" },
-        body:            { type: "string" },
+        subject:         { type: "string", description: "Asunto en el idioma de envío" },
+        body:            { type: "string", description: "Cuerpo del email en el idioma de envío" },
+        subject_es:      { type: "string", description: "Asunto en español para que Marcos lo revise (si el email se envía en inglés)" },
+        body_es:         { type: "string", description: "Cuerpo en español para que Marcos lo revise (si el email se envía en inglés)" },
+        language:        { type: "string", description: "'es' o 'en'" },
         sector:          { type: "string" },
         attach_proposal: { type: "boolean" }
       },
@@ -252,24 +411,26 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        name:   { type: "string" },
-        email:  { type: "string" },
-        sector: { type: "string" },
-        status: { type: "string", description: "contactado|interesado|negociando|cliente|descartado" },
-        notes:  { type: "string" }
+        name:     { type: "string" },
+        email:    { type: "string" },
+        sector:   { type: "string" },
+        language: { type: "string", description: "Idioma del cliente: 'es' (español) o 'en' (inglés). Detecta por el país/nombre del negocio. EEUU/UK/Australia = 'en', España/Latinoamérica = 'es'." },
+        status:   { type: "string", description: "contactado|interesado|negociando|cliente|descartado" },
+        notes:    { type: "string" }
       },
       required: ["name", "status"]
     }
   },
   {
     name: "update_client",
-    description: "Actualiza estado o notas de un cliente. Estado 'cliente' envía onboarding automático.",
+    description: "Actualiza estado, notas o idioma de un cliente. Estado 'cliente' envía onboarding automático.",
     input_schema: {
       type: "object",
       properties: {
-        name:   { type: "string" },
-        status: { type: "string" },
-        notes:  { type: "string" }
+        name:     { type: "string" },
+        status:   { type: "string" },
+        language: { type: "string", description: "'es' o 'en'" },
+        notes:    { type: "string" }
       },
       required: ["name"]
     }
@@ -285,14 +446,15 @@ const TOOLS = [
   },
   {
     name: "generate_proposal",
-    description: "Genera propuesta comercial en texto y PDF.",
+    description: "Genera propuesta comercial en texto y PDF. Consulta el idioma del cliente en el CRM antes de llamar.",
     input_schema: {
       type: "object",
       properties: {
         client_name: { type: "string" },
         sector:      { type: "string" },
         services:    { type: "string" },
-        budget:      { type: "string" }
+        budget:      { type: "string" },
+        language:    { type: "string", description: "'es' (español, por defecto) o 'en' (inglés)" }
       },
       required: ["client_name", "sector", "services"]
     }
@@ -303,7 +465,7 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        service_key: { type: "string", description: "1_video|pack3_videos|pack5_videos|pack3_fotos|pack5_fotos|pack8_fotos|uso_ilimitado" },
+        service_key: { type: "string", description: "1_video|pack3_videos|campana_fotos" },
         price:       { type: "number" },
         label:       { type: "string" }
       },
@@ -312,11 +474,11 @@ const TOOLS = [
   },
   {
     name: "update_web_price",
-    description: "Cambia un precio en xoralab.com y redesplega en Netlify.",
+    description: "Cambia un precio en xoralab.com y redesplega en Cloudflare Pages.",
     input_schema: {
       type: "object",
       properties: {
-        service_name: { type: "string", description: "'1 vídeo'|'Pack 3 vídeos'|'Pack 5 vídeos'|'Pack 3 fotos'|'Pack 5 fotos'|'Pack 8 fotos'" },
+        service_name: { type: "string", description: "'1 vídeo'|'Pack 3 vídeos'|'Campaña de fotos'" },
         new_price:    { type: "number" }
       },
       required: ["service_name", "new_price"]
@@ -328,20 +490,24 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        name:    { type: "string" },
-        sector:  { type: "string" },
-        subject: { type: "string" },
-        body:    { type: "string" }
+        name:     { type: "string" },
+        sector:   { type: "string" },
+        language: { type: "string", description: "'es' o 'en'" },
+        subject:  { type: "string" },
+        body:     { type: "string" }
       },
       required: ["name", "subject", "body"]
     }
   },
   {
     name: "get_templates",
-    description: "Obtiene plantillas de email guardadas.",
+    description: "Obtiene plantillas de email guardadas, opcionalmente filtradas por sector e idioma.",
     input_schema: {
       type: "object",
-      properties: { sector: { type: "string" } },
+      properties: {
+        sector:   { type: "string" },
+        language: { type: "string", description: "'es' o 'en'" }
+      },
       required: []
     }
   },
@@ -351,11 +517,10 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        videos:           { type: "number", description: "0,1,3,5" },
-        photos:           { type: "number", description: "0,3,5,8" },
-        ad_rights:        { type: "boolean" },
-        unlimited_rights: { type: "boolean" },
-        raw_files:        { type: "boolean" }
+        videos:      { type: "number", description: "0, 1 (vídeo suelto) o 3 (pack)" },
+        photos:      { type: "boolean", description: "true si quieren campaña de fotos (299€)" },
+        ad_rights:   { type: "boolean" },
+        raw_files:   { type: "boolean" }
       },
       required: ["videos", "photos"]
     }
@@ -371,16 +536,90 @@ const TOOLS = [
       },
       required: ["key", "value"]
     }
+  },
+  {
+    name: "save_prospect_list",
+    description: "Guarda la lista de prospectos encontrados para procesarlos en orden uno a uno. Llama esto siempre después de buscar empresas y mostrar la lista numerada.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prospects: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name:      { type: "string" },
+              website:   { type: "string" },
+              sector:    { type: "string" },
+              instagram: { type: "string", description: "@handle si se encontró" },
+              score:     { type: "number", description: "Lead score 1-10" }
+            },
+            required: ["name"]
+          }
+        }
+      },
+      required: ["prospects"]
+    }
   }
 ];
 
 // ── TOOL IMPLEMENTATIONS ──────────────────────────────────
 
+// ── GOOGLE PLACES ─────────────────────────────────────────
+
+async function searchPlaces(query) {
+  if (!GOOGLE_PLACES_KEY) return null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${GOOGLE_PLACES_KEY}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    if (!data.results?.length) return null;
+    return data.results.slice(0, 8).map((p, i) => {
+      const website = p.website ? `🌐 ${p.website}` : "";
+      const phone   = p.formatted_phone_number ? `📞 ${p.formatted_phone_number}` : "";
+      const rating  = p.rating ? `⭐ ${p.rating}/5 (${p.user_ratings_total || 0} reseñas)` : "";
+      const address = p.formatted_address || "";
+      const info    = [address, rating, phone, website].filter(Boolean).join(" | ");
+      return `${i + 1}. ${p.name}\n   ${info}`;
+    }).join("\n\n");
+  } catch (err) {
+    console.error("Error Google Places:", err.message);
+    return null;
+  }
+}
+
+// ── HUNTER.IO EMAIL FINDER ────────────────────────────────
+
+async function findEmailHunter(domainOrUrl) {
+  if (!HUNTER_API_KEY || !domainOrUrl) return null;
+  try {
+    const domain = domainOrUrl
+      .replace(/^https?:\/\//, "")
+      .replace(/\/.*$/, "")
+      .replace(/^www\./, "");
+    const res = await fetch(
+      `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&limit=5&api_key=${HUNTER_API_KEY}`,
+      { signal: AbortSignal.timeout(8000) }
+    );
+    const data = await res.json();
+    if (!data.data?.emails?.length) return null;
+    return data.data.emails
+      .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
+      .map(e => `${e.value} (${e.type || "email"}, confianza: ${e.confidence || "?"}%)`)
+      .join("\n");
+  } catch (err) {
+    console.error("Error Hunter.io:", err.message);
+    return null;
+  }
+}
+
+// ── WEB SEARCH ────────────────────────────────────────────
+
 async function searchWeb(query, count = 5) {
   if (!BRAVE_API_KEY) return "Falta BRAVE_API_KEY.";
   try {
     const res = await fetch(
-      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}&search_lang=es&country=ES`,
+      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`,
       { headers: { Accept: "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": BRAVE_API_KEY } }
     );
     const data = await res.json();
@@ -425,21 +664,46 @@ async function analyzeBusiness(input) {
     parts.push(`CONTENIDO WEB DE ${input.business_name}:\n${content}`);
   }
 
-  // 2. Search for social presence and general info
+  // 2. General info + social presence
   const socialResults = await searchWeb(`${input.business_name} ${input.sector || ""} Instagram redes sociales`, 5);
-  parts.push(`PRESENCIA EN REDES SOCIALES:\n${socialResults}`);
+  parts.push(`PRESENCIA ONLINE:\n${socialResults}`);
 
-  // 3. Search for reviews/reputation
+  // 3. Instagram handle specifically
+  const igResults = await searchWeb(`"${input.business_name}" site:instagram.com OR "${input.business_name}" instagram`, 4);
+  parts.push(`INSTAGRAM (busca el @handle exacto):\n${igResults}`);
+
+  // 4. Decision maker — owner or marketing responsible
+  const ownerResults = await searchWeb(`"${input.business_name}" fundador dueño propietario responsable marketing LinkedIn`, 4);
+  parts.push(`RESPONSABLE/DECISOR:\n${ownerResults}`);
+
+  // 5. Reviews/reputation
   const repResults = await searchWeb(`${input.business_name} opiniones reseñas calidad`, 3);
   parts.push(`REPUTACIÓN ONLINE:\n${repResults}`);
+
+  // 6. Email via Hunter.io if we have a website
+  if (input.website) {
+    const hunterEmail = await findEmailHunter(input.website);
+    if (hunterEmail) parts.push(`EMAIL ENCONTRADO (Hunter.io):\n${hunterEmail}`);
+  }
 
   return parts.join("\n\n---\n\n");
 }
 
 async function searchEmail(input) {
+  const parts = [];
+
+  // 1. Hunter.io if website provided
+  if (input.website) {
+    const hunterResult = await findEmailHunter(input.website);
+    if (hunterResult) parts.push(`EMAILS ENCONTRADOS (Hunter.io):\n${hunterResult}`);
+  }
+
+  // 2. Web search as fallback / complement
   const query = `"${input.business_name}" ${input.location || ""} email contacto`;
-  const results = await searchWeb(query, 5);
-  return `Resultados para encontrar email de "${input.business_name}":\n\n${results}`;
+  const webResults = await searchWeb(query, 5);
+  parts.push(`BÚSQUEDA WEB:\n${webResults}`);
+
+  return parts.join("\n\n---\n\n");
 }
 
 function prepareEmail(userId, input) {
@@ -448,10 +712,25 @@ function prepareEmail(userId, input) {
     business_name:   input.business_name,
     subject:         input.subject,
     body:            input.body,
+    language:        input.language || "es",
     sector:          input.sector || "default",
     attach_proposal: input.attach_proposal || false
   });
-  return `Email preparado para ${input.business_name}${input.attach_proposal ? " (con propuesta PDF adjunta)" : ""}. Usa /enviar para mandar o /cancelar para descartar.`;
+
+  // Vista previa siempre en español — enviar directamente a Telegram
+  const previewSubject = input.subject_es || input.subject;
+  const previewBody    = input.body_es    || input.body;
+  const langNote = (input.language === "en")
+    ? "\n_(el email se enviará en inglés al ejecutar /enviar)_"
+    : "";
+
+  const preview = `📧 *EMAIL LISTO — VISTA EN ESPAÑOL*${langNote}\n\n*Para:* ${input.to}\n*Asunto:* ${previewSubject}\n\n${previewBody}\n\n─────────────────\n/enviar · /saltar · /cancelar`;
+
+  // Enviar la vista previa directamente (efecto colateral) para que Marcos la vea siempre
+  bot.sendMessage(userId, preview, { parse_mode: "Markdown" }).catch(() => {});
+
+  // Devolver acuse simple a Claude (no repitas el email)
+  return `Email preparado y enviado a Marcos para revisión. Para: ${input.to}. Asunto: ${input.subject}`;
 }
 
 async function saveClient(input) {
@@ -460,10 +739,11 @@ async function saveClient(input) {
   const prevStatus = clients[id]?.status;
   clients[id] = {
     name:         input.name,
-    email:        input.email  || clients[id]?.email  || "",
-    sector:       input.sector || clients[id]?.sector || "",
+    email:        input.email    || clients[id]?.email    || "",
+    sector:       input.sector   || clients[id]?.sector   || "",
+    language:     input.language || clients[id]?.language || "es",
     status:       input.status,
-    notes:        input.notes  || clients[id]?.notes  || "",
+    notes:        input.notes    || clients[id]?.notes    || "",
     created_at:   clients[id]?.created_at   || new Date().toISOString(),
     updated_at:   new Date().toISOString(),
     contacted_at: input.status === "contactado"
@@ -497,6 +777,7 @@ async function updateClient(input) {
       clients[id].closed_at = new Date().toISOString();
     }
   }
+  if (input.language) clients[id].language = input.language;
   if (input.notes) {
     clients[id].notes = (clients[id].notes ? clients[id].notes + "\n" : "") +
       `[${new Date().toLocaleDateString("es-ES")}] ${input.notes}`;
@@ -523,11 +804,42 @@ async function getClients(statusFilter) {
   return filtered.map(c => {
     const days = c.contacted_at ? Math.floor((Date.now() - new Date(c.contacted_at)) / 86400000) : null;
     const followup = c.status === "contactado" && days >= 3 ? ` ⚠️ Sin respuesta hace ${days} días` : "";
-    return `• ${c.name} [${c.status.toUpperCase()}]${followup}\n  Email: ${c.email || "—"} | Sector: ${c.sector || "—"}\n  Notas: ${c.notes || "—"}`;
+    const langFlag = c.language === "en" ? " 🇬🇧" : "";
+    return `• ${c.name} [${c.status.toUpperCase()}]${followup}${langFlag}\n  Email: ${c.email || "—"} | Sector: ${c.sector || "—"}\n  Notas: ${c.notes || "—"}`;
   }).join("\n\n");
 }
 
 function generateProposalText(input) {
+  const lang = input.language || "es";
+  if (lang === "en") {
+    const date = new Date().toLocaleDateString("en-US");
+    return `COMMERCIAL PROPOSAL — XORA
+Date: ${date} | For: ${input.client_name} | Sector: ${input.sector}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT WE DO
+XORA is an AI-powered visual content agency. We create professional-quality photos and videos for brands — without the cost or timeline of a traditional production.
+
+PROPOSED SERVICES:
+${input.services}
+
+ESTIMATED INVESTMENT:
+${input.budget || "To be defined based on final scope"}
+
+PROCESS:
+1. Brief (1 day) → 2. AI Production (2-5 days) → 3. Review → 4. Delivery
+
+GUARANTEES:
+✓ Revisions included until your approval
+✓ Usage rights according to chosen package
+✓ Delivery within agreed timeline
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Marcos — Founder of XORA
+contacto@xoralab.com | ${SITE_URL}`;
+  }
+
   const date = new Date().toLocaleDateString("es-ES");
   return `PROPUESTA COMERCIAL — XORA
 Fecha: ${date} | Para: ${input.client_name} | Sector: ${input.sector}
@@ -569,7 +881,7 @@ async function toolUpdatePrice(input) {
 async function toolGetPrices() {
   const prices = await loadPrices();
   return "TARIFAS XORA:\n" + Object.entries(prices)
-    .map(([, v]) => `• ${v.label}: ${v.price}€`)
+    .map(([, v]) => `• ${v.label}: ${v.price}€ / $${v.price_usd || "—"}`)
     .join("\n");
 }
 
@@ -577,61 +889,45 @@ async function toolSaveTemplate(input) {
   const templates = await loadTemplates();
   const id = input.name.toLowerCase().replace(/\s+/g, "_");
   templates[id] = {
-    name:    input.name,
-    sector:  input.sector || "default",
-    subject: input.subject,
-    body:    input.body,
+    name:       input.name,
+    sector:     input.sector   || "default",
+    language:   input.language || "es",
+    subject:    input.subject,
+    body:       input.body,
     created_at: new Date().toISOString()
   };
   await saveTemplatesData(templates);
-  return `Plantilla "${input.name}" guardada.`;
+  return `Plantilla "${input.name}" guardada (${input.language === "en" ? "inglés" : "español"}).`;
 }
 
-async function toolGetTemplates(sectorFilter) {
+async function toolGetTemplates(sectorFilter, langFilter) {
   const templates = await loadTemplates();
-  const list = Object.values(templates);
+  let list = Object.values(templates);
   if (!list.length) return "No hay plantillas guardadas aún.";
-  const filtered = sectorFilter ? list.filter(t => t.sector === sectorFilter) : list;
-  if (!filtered.length) return `No hay plantillas para sector "${sectorFilter}".`;
-  return filtered.map(t =>
-    `📝 *${t.name}* [${t.sector}]\nAsunto: ${t.subject}\n${t.body.slice(0, 120)}...`
+  if (sectorFilter) list = list.filter(t => t.sector === sectorFilter);
+  if (langFilter)   list = list.filter(t => (t.language || "es") === langFilter);
+  if (!list.length) return `No hay plantillas para los filtros indicados.`;
+  return list.map(t =>
+    `📝 *${t.name}* [${t.sector}] [${t.language || "es"}]\nAsunto: ${t.subject}\n${t.body.slice(0, 120)}...`
   ).join("\n\n");
 }
 
 
 async function updateWebPrice(input) {
-  const NETLIFY_TOKEN   = process.env.NETLIFY_TOKEN;
-  const NETLIFY_SITE_ID = process.env.NETLIFY_SITE_ID;
-  if (!NETLIFY_TOKEN || !NETLIFY_SITE_ID) return "Faltan NETLIFY_TOKEN o NETLIFY_SITE_ID en Railway.";
+  const CF_TOKEN   = process.env.CF_PAGES_TOKEN;
+  const CF_ACCOUNT = process.env.CF_ACCOUNT_ID || "48eeec3c9d7c5da09b90bb50778c1a67";
+  const CF_PROJECT = process.env.CF_PAGES_PROJECT || "xoralab";
 
-  const authHeader = { "Authorization": `Bearer ${NETLIFY_TOKEN}` };
-
-  // 1. Get file list from latest deploy to preserve all files (logo.png etc.)
-  let existingFiles = {};
-  try {
-    const deploysRes = await fetch(
-      `https://api.netlify.com/api/v1/sites/${NETLIFY_SITE_ID}/deploys?per_page=1`,
-      { headers: authHeader }
-    );
-    const deploys = await deploysRes.json();
-    if (Array.isArray(deploys) && deploys.length > 0) {
-      const filesRes = await fetch(
-        `https://api.netlify.com/api/v1/deploys/${deploys[0].id}/files`,
-        { headers: authHeader }
-      );
-      const files = await filesRes.json();
-      if (Array.isArray(files)) {
-        for (const f of files) {
-          // path like "/index.html" or "/logo.png", sha is the hash
-          if (f.path && f.sha) existingFiles[f.path] = f.sha;
-        }
-      }
-    }
-  } catch (err) {
-    console.error("Error obteniendo archivos del deploy anterior:", err.message);
+  const VALID_NAMES = ["1 vídeo", "Pack 3 vídeos", "Campaña de fotos"];
+  if (!VALID_NAMES.includes(input.service_name)) {
+    return `Nombre de servicio no válido: "${input.service_name}". Usa uno de: ${VALID_NAMES.map(n => `"${n}"`).join(", ")}`;
   }
 
-  // 2. Fetch current HTML
+  if (!CF_TOKEN) {
+    return `Falta CF_PAGES_TOKEN en Railway. Crea un token en dash.cloudflare.com/profile/api-tokens con permiso "Cloudflare Pages:Edit" y añádelo como variable de entorno CF_PAGES_TOKEN.`;
+  }
+
+  // 1. Fetch current HTML from live site
   let html;
   try {
     const r = await fetch("https://xoralab.com", { signal: AbortSignal.timeout(10000) });
@@ -640,81 +936,84 @@ async function updateWebPrice(input) {
     return `Error descargando la web: ${err.message}`;
   }
 
-  // 3. Replace price in HTML
+  // 2. Update data-es attribute and visible text for the matching price card
+  // HTML structure: <span class="price-amount" data-es="499€" data-en="$599">499€</span>
+  // We find the service name in the surrounding context and update the euro price
   const escaped = input.service_name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(
-    `(<div class="price-name">${escaped}<\\/div>\\s*<div[^>]*>(?:<span class="price-from">desde <\\/span>)?<span class="price-amount">)[^<]+(</span>)`,
+  // Find the price card containing this service name
+  const cardRegex = new RegExp(
+    `(${escaped}[\\s\\S]{0,300}?<span[^>]*class="price-amount"[^>]*data-es=")[^"]*("\\s+data-en="[^"]*"[^>]*>)[0-9.,]+€`,
     "i"
   );
-  if (!regex.test(html)) {
-    return `No encontré "${input.service_name}" en la web. Nombres válidos: "1 vídeo", "Pack 3 vídeos", "Pack 5 vídeos", "Pack 3 fotos", "Pack 5 fotos", "Pack 8 fotos"`;
+
+  if (!cardRegex.test(html)) {
+    return `No encontré "${input.service_name}" en la web. Comprueba que el nombre es exactamente uno de: "1 vídeo", "Pack 3 vídeos", "Campaña de fotos"`;
   }
-  html = html.replace(regex, `$1${input.new_price}€$2`);
+  html = html.replace(cardRegex, `$1${input.new_price}€$2${input.new_price}€`);
 
-  // 4. SHA1 of new HTML
-  const htmlSha = createHash("sha1").update(html).digest("hex");
-
-  // 5. Build manifest: all existing files + updated index.html
-  const fileManifest = { ...existingFiles, "/index.html": htmlSha };
-
-  // 6. Create deploy with full manifest
-  let deploy;
+  // 3. Fetch all static assets to include in the deployment
+  let logoPng, faviconSvg;
   try {
-    const r = await fetch(`https://api.netlify.com/api/v1/sites/${NETLIFY_SITE_ID}/deploys`, {
-      method: "POST",
-      headers: { ...authHeader, "Content-Type": "application/json" },
-      body: JSON.stringify({ files: fileManifest })
-    });
-    deploy = await r.json();
-    if (!deploy.id) return `Error creando deploy: ${JSON.stringify(deploy)}`;
+    const [logoRes, faviconRes] = await Promise.all([
+      fetch("https://xoralab.com/logo.png",    { signal: AbortSignal.timeout(8000) }),
+      fetch("https://xoralab.com/favicon.svg", { signal: AbortSignal.timeout(8000) })
+    ]);
+    logoPng    = Buffer.from(await logoRes.arrayBuffer());
+    faviconSvg = await faviconRes.text();
   } catch (err) {
-    return `Error en Netlify API: ${err.message}`;
+    console.error("Aviso: no se pudieron obtener assets estáticos:", err.message);
   }
 
-  // 7. Upload only what Netlify requests (only index.html, logo.png ya está en su storage)
-  if (Array.isArray(deploy.required) && deploy.required.length > 0) {
-    for (const requiredSha of deploy.required) {
-      if (requiredSha === htmlSha) {
-        await fetch(`https://api.netlify.com/api/v1/deploys/${deploy.id}/files/index.html`, {
-          method: "PUT",
-          headers: { ...authHeader, "Content-Type": "application/octet-stream" },
-          body: html
-        });
+  // 4. Upload to Cloudflare Pages via Direct Upload API
+  try {
+    const formData = new FormData();
+    formData.append("/index.html",  new Blob([html],        { type: "text/html" }),              "index.html");
+    if (logoPng)    formData.append("/logo.png",    new Blob([logoPng],    { type: "image/png" }),             "logo.png");
+    if (faviconSvg) formData.append("/favicon.svg", new Blob([faviconSvg], { type: "image/svg+xml" }),        "favicon.svg");
+
+    const r = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/pages/projects/${CF_PROJECT}/deployments`,
+      {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${CF_TOKEN}` },
+        body:    formData,
+        signal:  AbortSignal.timeout(30000)
       }
+    );
+    const data = await r.json();
+    if (!data.success) {
+      return `Error CF Pages: ${JSON.stringify(data.errors)}`;
     }
+    return `✅ Precio de "${input.service_name}" actualizado a ${input.new_price}€ en xoralab.com. Deploy en progreso (15-30 segundos).`;
+  } catch (err) {
+    return `Error subiendo a Cloudflare Pages: ${err.message}`;
   }
-
-  return `✅ Precio de "${input.service_name}" actualizado a ${input.new_price}€ en xoralab.com. La web se actualiza en unos segundos.`;
 }
 
 async function toolCalculateBudget(input) {
   const prices = await loadPrices();
   let base = 0;
-  let lines = [];
+  const lines = [];
 
   // Videos
   if (input.videos === 1) {
-    base += prices["1_video"]?.price || 200;
-    lines.push(`1 vídeo: ${prices["1_video"]?.price || 200}€`);
-  } else if (input.videos === 3) {
-    base += prices["pack3_videos"]?.price || 400;
-    lines.push(`Pack 3 vídeos: ${prices["pack3_videos"]?.price || 400}€`);
-  } else if (input.videos >= 5) {
-    base += prices["pack5_videos"]?.price || 600;
-    lines.push(`Pack 5 vídeos: ${prices["pack5_videos"]?.price || 600}€`);
+    const p = prices["1_video"]?.price || 499;
+    base += p;
+    lines.push(`1 vídeo: ${p}€`);
+  } else if (input.videos >= 3) {
+    const p = prices["pack3_videos"]?.price || 1199;
+    base += p;
+    lines.push(`Pack 3 vídeos: ${p}€`);
   }
 
-  // Photos
-  if (input.photos === 3) {
-    base += prices["pack3_fotos"]?.price || 120;
-    lines.push(`Pack 3 fotos: ${prices["pack3_fotos"]?.price || 120}€`);
-  } else if (input.photos === 5) {
-    base += prices["pack5_fotos"]?.price || 190;
-    lines.push(`Pack 5 fotos: ${prices["pack5_fotos"]?.price || 190}€`);
-  } else if (input.photos >= 8) {
-    base += prices["pack8_fotos"]?.price || 300;
-    lines.push(`Pack 8 fotos: ${prices["pack8_fotos"]?.price || 300}€`);
+  // Photos (boolean — campaña de fotos)
+  if (input.photos === true || input.photos === 1) {
+    const p = prices["campana_fotos"]?.price || 299;
+    base += p;
+    lines.push(`Campaña de fotos: ${p}€`);
   }
+
+  if (!lines.length) return "No has seleccionado ningún servicio.";
 
   let extras = 0;
 
@@ -728,11 +1027,6 @@ async function toolCalculateBudget(input) {
     extras += rawExtra;
     lines.push(`Archivos RAW (+50%): +${rawExtra}€`);
   }
-  if (input.unlimited_rights) {
-    const unlimitedExtra = prices["uso_ilimitado"]?.price || 250;
-    extras += unlimitedExtra;
-    lines.push(`Uso ilimitado: +${unlimitedExtra}€`);
-  }
 
   const total = base + extras;
   return `PRESUPUESTO XORA:\n${lines.join("\n")}\n───────────────\nTOTAL: ${total}€`;
@@ -744,7 +1038,24 @@ async function runTool(name, input, userId) {
   switch (name) {
     case "analyze_business":  return await analyzeBusiness(input);
     case "search_web":        return await searchWeb(input.query, 5);
-    case "search_businesses": return await searchWeb(`${input.query} email contacto web`, 10);
+    case "search_businesses": {
+      // 1. Google Places si está disponible (estructurado), sino Brave
+      let results;
+      const placesResult = await searchPlaces(input.query);
+      if (placesResult) {
+        results = `RESULTADOS GOOGLE MAPS:\n${placesResult}`;
+      } else {
+        const sector = input.sector ? input.sector + " " : "";
+        results = await searchWeb(`${sector}${input.query} Instagram contacto email web`, 10);
+      }
+      // 2. Anti-duplicados: avisar de los que ya están en CRM
+      const clients = await loadClients();
+      const inCRM = Object.values(clients).map(c => `${c.name} [${c.status}]`);
+      const crmNote = inCRM.length
+        ? `\n\n⚠️ YA EN TU CRM (no volver a proponer):\n${inCRM.map(n => `• ${n}`).join("\n")}`
+        : "\n\nCRM: vacío todavía.";
+      return results + crmNote;
+    }
     case "search_email":      return await searchEmail(input);
     case "prepare_email":     return prepareEmail(userId, input);
     case "save_client":       return await saveClient(input);
@@ -755,7 +1066,7 @@ async function runTool(name, input, userId) {
     case "update_web_price":  return await updateWebPrice(input);
     case "get_prices":        return await toolGetPrices();
     case "save_template":     return await toolSaveTemplate(input);
-    case "get_templates":     return await toolGetTemplates(input.sector);
+    case "get_templates":     return await toolGetTemplates(input.sector, input.language);
     case "calculate_budget":  return await toolCalculateBudget(input);
     case "save_memory": {
       const memory = await loadMemory();
@@ -763,6 +1074,11 @@ async function runTool(name, input, userId) {
       memory[input.key] = existing + `[${new Date().toLocaleDateString("es-ES")}] ${input.value}`;
       await saveMemory(memory);
       return `Guardado: ${input.value}`;
+    }
+    case "save_prospect_list": {
+      const items = (input.prospects || []).filter(p => p.name);
+      prospectQueues.set(userId, { items, index: 0 });
+      return `Cola guardada con ${items.length} prospectos. Índice actual: 0. Di "empieza" para analizar el primero.`;
     }
     default:
       return "Herramienta no reconocida.";
@@ -814,15 +1130,59 @@ async function buildSystemPrompt(userMessage = "") {
   return SYSTEM_PROMPT + extra;
 }
 
+// Elimina tool_results huérfanos (sin su tool_use correspondiente) para evitar el error 400
+function sanitizeMessages(messages) {
+  if (!messages.length) return [];
+
+  // Recopilar todos los tool_use IDs presentes
+  const toolUseIds = new Set();
+  for (const m of messages) {
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (b.type === "tool_use") toolUseIds.add(b.id);
+      }
+    }
+  }
+
+  // Filtrar tool_results sin pareja y mensajes vacíos
+  const cleaned = messages.map(m => {
+    if (m.role === "user" && Array.isArray(m.content)) {
+      const filtered = m.content.filter(b =>
+        b.type !== "tool_result" || toolUseIds.has(b.tool_use_id)
+      );
+      if (filtered.length === 0) return null;
+      return { ...m, content: filtered };
+    }
+    return m;
+  }).filter(Boolean);
+
+  // Debe empezar por un mensaje de usuario
+  while (cleaned.length > 0 && cleaned[0].role !== "user") cleaned.shift();
+
+  // Fusionar mensajes consecutivos del mismo rol (no debería pasar, pero por si acaso)
+  const result = [];
+  for (const m of cleaned) {
+    const prev = result[result.length - 1];
+    if (prev && prev.role === m.role) {
+      const prevContent  = typeof prev.content  === "string" ? [{ type: "text", text: prev.content  }] : [...prev.content];
+      const currContent  = typeof m.content     === "string" ? [{ type: "text", text: m.content     }] : [...m.content];
+      result[result.length - 1] = { ...prev, content: [...prevContent, ...currContent] };
+    } else {
+      result.push(m);
+    }
+  }
+  return result;
+}
+
 function compressHistory(messages) {
-  // Mantener los últimos 6 turnos intactos; en los más antiguos recortar tool results largos
-  if (messages.length <= 12) return messages;
+  // Mantener los últimos 10 turnos intactos para no perder emails y datos recientes
+  if (messages.length <= 20) return messages;
   return messages.map((m, i) => {
-    if (i >= messages.length - 12) return m;
+    if (i >= messages.length - 20) return m;
     if (Array.isArray(m.content)) {
       const compressed = m.content.map(b => {
-        if (b.type === "tool_result" && typeof b.content === "string" && b.content.length > 200) {
-          return { ...b, content: b.content.slice(0, 200) + "…[recortado]" };
+        if (b.type === "tool_result" && typeof b.content === "string" && b.content.length > 600) {
+          return { ...b, content: b.content.slice(0, 600) + "…[recortado]" };
         }
         return b;
       });
@@ -833,7 +1193,7 @@ function compressHistory(messages) {
 }
 
 async function askClaude(messages, userId) {
-  let current = compressHistory([...messages]);
+  let current = sanitizeMessages(compressHistory([...messages]));
   // Extraer el último mensaje del usuario para inyección condicional
   const lastUserContent = messages.filter(m => m.role === "user").at(-1)?.content;
   const lastUserText = typeof lastUserContent === "string" ? lastUserContent : "";
@@ -842,7 +1202,7 @@ async function askClaude(messages, userId) {
   while (true) {
     const response = await claude.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 2000,
+      max_tokens: 4096,
       system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
       tools: TOOLS,
       messages: current
@@ -1381,11 +1741,41 @@ bot.onText(/\/enviar/, async (msg) => {
 
     await saveClient({ name: pending.business_name, email: pending.to, status: "contactado" });
     pendingEmails.delete(msg.from.id);
-    bot.sendMessage(msg.chat.id,
+    await bot.sendMessage(msg.chat.id,
       `✅ Email enviado a ${pending.business_name} (${pending.to})` +
       (pdfBuffer ? "\n📎 Propuesta PDF adjunta" : "") +
       `\n📋 Guardado en CRM como "contactado".`
     );
+
+    // ── AUTO-ADVANCE prospect queue ────────────────────────
+    const queue = prospectQueues.get(msg.from.id);
+    if (!queue) return;
+
+    queue.index++;
+    if (queue.index >= queue.items.length) {
+      prospectQueues.delete(msg.from.id);
+      await bot.sendMessage(msg.chat.id, "🎉 Has completado todas las empresas de la lista.");
+      return;
+    }
+
+    prospectQueues.set(msg.from.id, queue);
+    const next = queue.items[queue.index];
+    await bot.sendMessage(msg.chat.id,
+      `➡️ Siguiente (${queue.index + 1}/${queue.items.length}): *${next.name}*. Analizando...`,
+      { parse_mode: "Markdown" }
+    );
+    await bot.sendChatAction(msg.chat.id, "typing");
+
+    const userHistory = await getHistory(msg.from.id);
+    userHistory.push({
+      role: "user",
+      content: `Analiza ahora la siguiente empresa de la cola: "${next.name}"${next.website ? `, web: ${next.website}` : ""}${next.sector ? `, sector: ${next.sector}` : ""}. Muéstrame el email en español y el DM de Instagram con el @handle.`
+    });
+    const { text, messages } = await askClaude(userHistory, msg.from.id);
+    await persistHistory(msg.from.id, messages);
+
+    sendLong(msg.chat.id, text);
+
   } catch (err) {
     bot.sendMessage(msg.chat.id, `❌ Error: ${err.message}`);
   }
@@ -1396,6 +1786,38 @@ bot.onText(/\/cancelar/, (msg) => {
   const had = pendingEmails.has(msg.from.id);
   pendingEmails.delete(msg.from.id);
   bot.sendMessage(msg.chat.id, had ? "Email cancelado." : "No hay ningún email pendiente.");
+});
+
+bot.onText(/\/saltar/, async (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  pendingEmails.delete(msg.from.id);
+  const queue = prospectQueues.get(msg.from.id);
+  if (!queue) { bot.sendMessage(msg.chat.id, "No hay ninguna cola activa."); return; }
+
+  queue.index++;
+  if (queue.index >= queue.items.length) {
+    prospectQueues.delete(msg.from.id);
+    await bot.sendMessage(msg.chat.id, "Lista completada.");
+    return;
+  }
+
+  prospectQueues.set(msg.from.id, queue);
+  const next = queue.items[queue.index];
+  await bot.sendMessage(msg.chat.id,
+    `⏭️ Saltada. Siguiente (${queue.index + 1}/${queue.items.length}): *${next.name}*. Analizando...`,
+    { parse_mode: "Markdown" }
+  );
+  await bot.sendChatAction(msg.chat.id, "typing");
+
+  const userHistory = await getHistory(msg.from.id);
+  userHistory.push({
+    role: "user",
+    content: `Analiza ahora la siguiente empresa de la cola: "${next.name}"${next.website ? `, web: ${next.website}` : ""}${next.sector ? `, sector: ${next.sector}` : ""}. Muéstrame el email en español y el DM de Instagram con el @handle.`
+  });
+  const { text, messages } = await askClaude(userHistory, msg.from.id);
+  await persistHistory(msg.from.id, messages);
+
+  sendLong(msg.chat.id, text);
 });
 
 // ── VOICE MESSAGES ────────────────────────────────────────
@@ -1430,12 +1852,7 @@ bot.on("voice", async (msg) => {
     userHistory.push({ role: "user", content: text });
     const { text: reply, messages } = await askClaude(userHistory, userId);
     await persistHistory(userId, messages);
-    if (reply) {
-      const pending = pendingEmails.get(userId);
-      let finalReply = reply;
-      if (pending) finalReply += `\n\n─────────────────\n📧 EMAIL LISTO\nPara: ${pending.to}\nAsunto: ${pending.subject}\n\n${pending.body}\n─────────────────\n/enviar · /cancelar`;
-      sendLong(msg.chat.id, finalReply);
-    }
+    if (reply) sendLong(msg.chat.id, reply);
   } catch (err) {
     console.error("Error en voz:", err.message);
     bot.sendMessage(msg.chat.id, "Error procesando el audio.");
@@ -1504,15 +1921,13 @@ bot.on("message", async (msg) => {
     await persistHistory(userId, messages);
     if (!text) { bot.sendMessage(chatId, "Sin respuesta. Inténtalo de nuevo."); return; }
 
-    const pending = pendingEmails.get(userId);
-    let reply = text;
-    if (pending) {
-      reply += `\n\n─────────────────\n📧 EMAIL LISTO\nPara: ${pending.to}\nAsunto: ${pending.subject}\n\n${pending.body}\n─────────────────\n/enviar para enviar · /cancelar para descartar`;
-    }
-    sendLong(chatId, reply);
+    sendLong(chatId, text);
   } catch (err) {
     console.error("Error:", err.message);
-    bot.sendMessage(chatId, "Error. Inténtalo de nuevo.");
+    const errMsg = err.message?.includes("overloaded") ? "Claude está saturado, espera unos segundos e inténtalo de nuevo."
+      : err.message?.includes("context") || err.message?.includes("length") ? "Conversación demasiado larga. Usa /reset para empezar de nuevo."
+      : `Error: ${err.message}`;
+    bot.sendMessage(chatId, errMsg);
   }
 });
 
