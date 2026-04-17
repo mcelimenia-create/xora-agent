@@ -1955,49 +1955,87 @@ bot.on("message", async (msg) => {
 
 // ── /buscar AUTO-CAMPAIGN ─────────────────────────────────
 
-// Large pool — each /buscar picks 10 random combos → never repeats the same run twice
-const BUSCAR_POOL = [
-  // España
-  { name: "moda España",          query: "tienda moda ropa boutique España",                  lang: "es", country: "España" },
-  { name: "restaurante España",   query: "restaurante bar cafetería España contacto email",   lang: "es", country: "España" },
-  { name: "fitness España",       query: "gimnasio boutique pilates yoga España",             lang: "es", country: "España" },
-  { name: "ecommerce España",     query: "tienda online ecommerce marca España",              lang: "es", country: "España" },
-  { name: "belleza España",       query: "clínica estética belleza peluquería España",        lang: "es", country: "España" },
-  { name: "joyería España",       query: "joyería bisutería accesorios marca España",        lang: "es", country: "España" },
-  { name: "hotel España",         query: "hotel boutique hostal alojamiento España",          lang: "es", country: "España" },
-  { name: "fotografía España",    query: "fotógrafo estudio fotografía marca España",         lang: "es", country: "España" },
-  { name: "decoración España",    query: "tienda decoración hogar interiorismo España",       lang: "es", country: "España" },
-  { name: "alimentación España",  query: "marca alimentación producto gourmet España",        lang: "es", country: "España" },
-  { name: "surf/deporte España",  query: "tienda surf deporte outdoor España",                lang: "es", country: "España" },
-  { name: "inmobiliaria España",  query: "inmobiliaria agencia pisos casas España",           lang: "es", country: "España" },
-  { name: "peluquería España",    query: "peluquería barbería salón belleza España",          lang: "es", country: "España" },
-  { name: "tatuaje España",       query: "estudio tatuaje tattoo España",                     lang: "es", country: "España" },
-  { name: "consultoría España",   query: "consultoría agencia marketing digital España",      lang: "es", country: "España" },
-  // México / LATAM
-  { name: "moda México",          query: "tienda moda ropa boutique México marca",            lang: "es", country: "México" },
-  { name: "restaurante México",   query: "restaurante bar México contacto",                   lang: "es", country: "México" },
-  { name: "belleza México",       query: "spa estética belleza clínica México",               lang: "es", country: "México" },
-  { name: "ecommerce México",     query: "tienda online ecommerce México marca",              lang: "es", country: "México" },
-  { name: "fitness México",       query: "gimnasio crossfit yoga México",                     lang: "es", country: "México" },
-  // USA
-  { name: "fashion USA",          query: "fashion clothing boutique brand USA",               lang: "en", country: "USA" },
-  { name: "restaurant USA",       query: "restaurant cafe bistro USA contact email",          lang: "en", country: "USA" },
-  { name: "gym USA",              query: "boutique gym fitness studio yoga USA",              lang: "en", country: "USA" },
-  { name: "ecommerce USA",        query: "ecommerce online shop small brand USA",             lang: "en", country: "USA" },
-  { name: "beauty USA",           query: "beauty spa aesthetics salon brand USA",             lang: "en", country: "USA" },
-  { name: "jewelry USA",          query: "jewelry accessories handmade brand USA",            lang: "en", country: "USA" },
-  { name: "hotel USA",            query: "boutique hotel bed breakfast USA",                  lang: "en", country: "USA" },
-  { name: "food brand USA",       query: "food brand artisan product USA",                    lang: "en", country: "USA" },
-  { name: "surf/outdoor USA",     query: "surf outdoor sports brand USA",                     lang: "en", country: "USA" },
-  { name: "interior design USA",  query: "interior design decor home brand USA",              lang: "en", country: "USA" },
-  { name: "tattoo USA",           query: "tattoo studio artist USA",                          lang: "en", country: "USA" },
-  { name: "real estate USA",      query: "real estate agency luxury homes USA",               lang: "en", country: "USA" },
-  // UK
-  { name: "fashion UK",           query: "fashion clothing boutique brand UK",                lang: "en", country: "UK" },
-  { name: "restaurant UK",        query: "restaurant cafe bistro UK contact email",           lang: "en", country: "UK" },
-  { name: "beauty UK",            query: "beauty spa aesthetics salon brand UK",              lang: "en", country: "UK" },
-  { name: "gym UK",               query: "boutique gym fitness yoga studio UK",               lang: "en", country: "UK" },
+// Cities injected randomly into queries → different results every run
+const CITIES_ES = [
+  "Madrid","Barcelona","Valencia","Sevilla","Zaragoza","Málaga","Murcia","Palma","Las Palmas",
+  "Bilbao","Alicante","Córdoba","Valladolid","Vigo","Gijón","Hospitalet","Vitoria","Granada",
+  "Elche","Oviedo","Badalona","Cartagena","Sabadell","Móstoles","Jerez","Terrassa","Santa Cruz de Tenerife",
+  "Pamplona","Almería","Fuenlabrada","Leganés","San Sebastián","Burgos","Santander","Castellón",
+  "Albacete","Alcalá de Henares","Getafe","Logroño","Badajoz","Salamanca","Lleida","Huelva",
 ];
+const CITIES_MX = [
+  "Ciudad de México","Guadalajara","Monterrey","Puebla","Tijuana","León","Juárez","Torreón",
+  "Querétaro","San Luis Potosí","Mérida","Mexicali","Aguascalientes","Cancún","Hermosillo",
+];
+const CITIES_US = [
+  "New York","Los Angeles","Chicago","Houston","Phoenix","Philadelphia","San Antonio","San Diego",
+  "Dallas","Austin","Jacksonville","San Francisco","Columbus","Charlotte","Indianapolis",
+  "Seattle","Denver","Boston","Nashville","Portland","Las Vegas","Memphis","Atlanta","Miami",
+  "Minneapolis","Tucson","New Orleans","Cleveland","Pittsburgh","Tampa","Orlando","Raleigh",
+  "Salt Lake City","Boise","Richmond","Spokane","Scottsdale","Tempe","Chandler","Gilbert",
+];
+const CITIES_UK = [
+  "London","Birmingham","Manchester","Leeds","Glasgow","Liverpool","Sheffield","Edinburgh",
+  "Bristol","Cardiff","Leicester","Coventry","Bradford","Nottingham","Kingston upon Hull",
+];
+
+// Sector templates — {city} gets replaced with a random city each run
+const BUSCAR_TEMPLATES = [
+  // España
+  { name: "moda",          tpl: "tienda moda ropa boutique {city}",              lang: "es", cities: CITIES_ES },
+  { name: "restaurante",   tpl: "restaurante bar cafetería {city} email",        lang: "es", cities: CITIES_ES },
+  { name: "fitness",       tpl: "gimnasio pilates yoga crossfit {city}",         lang: "es", cities: CITIES_ES },
+  { name: "ecommerce",     tpl: "tienda online ecommerce marca {city}",          lang: "es", cities: CITIES_ES },
+  { name: "belleza",       tpl: "clínica estética belleza peluquería {city}",    lang: "es", cities: CITIES_ES },
+  { name: "joyería",       tpl: "joyería bisutería accesorios {city}",           lang: "es", cities: CITIES_ES },
+  { name: "hotel",         tpl: "hotel boutique hostal {city}",                  lang: "es", cities: CITIES_ES },
+  { name: "decoración",    tpl: "tienda decoración hogar interiorismo {city}",   lang: "es", cities: CITIES_ES },
+  { name: "alimentación",  tpl: "tienda gourmet alimentación producto {city}",   lang: "es", cities: CITIES_ES },
+  { name: "deporte",       tpl: "tienda surf deporte outdoor {city}",            lang: "es", cities: CITIES_ES },
+  { name: "inmobiliaria",  tpl: "inmobiliaria agencia pisos {city}",             lang: "es", cities: CITIES_ES },
+  { name: "peluquería",    tpl: "peluquería barbería salón {city}",              lang: "es", cities: CITIES_ES },
+  { name: "tatuaje",       tpl: "estudio tatuaje tattoo {city}",                 lang: "es", cities: CITIES_ES },
+  { name: "fotografía",    tpl: "estudio fotografía fotógrafo marca {city}",     lang: "es", cities: CITIES_ES },
+  { name: "cafetería",     tpl: "cafetería coffee shop brunch {city}",           lang: "es", cities: CITIES_ES },
+  { name: "veterinaria",   tpl: "clínica veterinaria mascotas {city}",           lang: "es", cities: CITIES_ES },
+  { name: "arquitectura",  tpl: "estudio arquitectura diseño interior {city}",   lang: "es", cities: CITIES_ES },
+  // México / LATAM
+  { name: "moda MX",       tpl: "tienda moda ropa boutique {city}",              lang: "es", cities: CITIES_MX },
+  { name: "restaurante MX",tpl: "restaurante bar {city} contacto",               lang: "es", cities: CITIES_MX },
+  { name: "belleza MX",    tpl: "spa estética belleza clínica {city}",           lang: "es", cities: CITIES_MX },
+  { name: "fitness MX",    tpl: "gimnasio crossfit yoga {city}",                 lang: "es", cities: CITIES_MX },
+  { name: "ecommerce MX",  tpl: "marca ecommerce tienda online {city}",          lang: "es", cities: CITIES_MX },
+  // USA
+  { name: "fashion",       tpl: "fashion clothing boutique {city}",              lang: "en", cities: CITIES_US },
+  { name: "restaurant",    tpl: "restaurant cafe bistro {city}",                 lang: "en", cities: CITIES_US },
+  { name: "gym",           tpl: "boutique gym fitness studio {city}",            lang: "en", cities: CITIES_US },
+  { name: "ecommerce",     tpl: "ecommerce online shop brand {city}",            lang: "en", cities: CITIES_US },
+  { name: "beauty",        tpl: "beauty spa aesthetics salon {city}",            lang: "en", cities: CITIES_US },
+  { name: "jewelry",       tpl: "jewelry accessories handmade brand {city}",     lang: "en", cities: CITIES_US },
+  { name: "hotel",         tpl: "boutique hotel bed breakfast {city}",           lang: "en", cities: CITIES_US },
+  { name: "food brand",    tpl: "artisan food brand shop {city}",                lang: "en", cities: CITIES_US },
+  { name: "outdoor",       tpl: "surf outdoor sports brand {city}",              lang: "en", cities: CITIES_US },
+  { name: "interior",      tpl: "interior design decor home brand {city}",       lang: "en", cities: CITIES_US },
+  { name: "tattoo",        tpl: "tattoo studio artist {city}",                   lang: "en", cities: CITIES_US },
+  { name: "real estate",   tpl: "real estate agency luxury homes {city}",        lang: "en", cities: CITIES_US },
+  { name: "coffee",        tpl: "specialty coffee shop cafe {city}",             lang: "en", cities: CITIES_US },
+  { name: "yoga",          tpl: "yoga pilates wellness studio {city}",           lang: "en", cities: CITIES_US },
+  { name: "photography",   tpl: "photography studio brand {city}",               lang: "en", cities: CITIES_US },
+  // UK
+  { name: "fashion UK",    tpl: "fashion clothing boutique {city}",              lang: "en", cities: CITIES_UK },
+  { name: "restaurant UK", tpl: "restaurant cafe bistro {city}",                 lang: "en", cities: CITIES_UK },
+  { name: "beauty UK",     tpl: "beauty spa aesthetics salon {city}",            lang: "en", cities: CITIES_UK },
+  { name: "gym UK",        tpl: "boutique gym fitness yoga {city}",              lang: "en", cities: CITIES_UK },
+];
+
+function buildBuscarQuery(template) {
+  const city = template.cities[Math.floor(Math.random() * template.cities.length)];
+  const query = template.tpl.replace("{city}", city);
+  const country = template.cities === CITIES_ES ? "España"
+    : template.cities === CITIES_MX ? "México"
+    : template.cities === CITIES_UK ? "UK" : "USA";
+  return { query, city, country, name: `${template.name} · ${city}`, lang: template.lang };
+}
 
 // Extract email addresses from raw HTML/text
 function extractEmailsFromText(text) {
@@ -2128,8 +2166,8 @@ async function runAutoBuscar(userId, chatId) {
   let sent = 0;
   let skipped = 0;
 
-  // Pick 10 random categories from the pool (no repeats within same run)
-  const targets = shuffleArray(BUSCAR_POOL).slice(0, 10);
+  // Pick 10 random templates and build a unique query for each (different city every time)
+  const targets = shuffleArray(BUSCAR_TEMPLATES).slice(0, 10).map(buildBuscarQuery);
   // Track emails already sent THIS run to avoid duplicates within the campaign
   const sentThisRun = new Set();
 
