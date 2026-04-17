@@ -1956,19 +1956,82 @@ bot.on("message", async (msg) => {
 // ── /buscar AUTO-CAMPAIGN ─────────────────────────────────
 
 const BUSCAR_SECTORS = [
-  { name: "moda y ropa",         queryES: "tienda moda ropa boutique Instagram España",          queryUS: "fashion clothing boutique brand Instagram USA" },
-  { name: "restaurante",         queryES: "restaurante cafetería bar Instagram España",           queryUS: "restaurant cafe bar Instagram USA" },
-  { name: "fitness y gimnasio",  queryES: "gimnasio boutique fitness entrenador España",          queryUS: "boutique gym fitness studio USA" },
-  { name: "ecommerce",           queryES: "tienda online ecommerce producto España Instagram",    queryUS: "ecommerce online shop small brand USA Instagram" },
-  { name: "belleza y cosmética", queryES: "clínica estética belleza cosmética España Instagram",  queryUS: "beauty spa aesthetics cosmetics brand USA Instagram" },
+  { name: "moda y ropa",         queryES: "tienda moda ropa boutique España",          queryUS: "fashion clothing boutique brand USA" },
+  { name: "restaurante",         queryES: "restaurante cafetería bar España contacto",  queryUS: "restaurant cafe bar USA contact" },
+  { name: "fitness y gimnasio",  queryES: "gimnasio boutique fitness España",           queryUS: "boutique gym fitness studio USA" },
+  { name: "ecommerce",           queryES: "tienda online ecommerce España marca",       queryUS: "ecommerce online shop brand USA" },
+  { name: "belleza y cosmética", queryES: "clínica estética belleza España",            queryUS: "beauty spa aesthetics cosmetics USA" },
 ];
+
+// Extract email addresses from raw HTML/text
+function extractEmailsFromText(text) {
+  const matches = text.match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g) || [];
+  return [...new Set(matches)].filter(e =>
+    !e.match(/\.(png|jpg|gif|svg|woff|css|js)$/i) &&
+    !e.includes("example") && !e.includes("sentry") &&
+    !e.includes("cloudflare") && !e.includes("googleapis")
+  );
+}
+
+// Multi-strategy email finder for a prospect
+async function findBestEmail(prospect, country) {
+  let website = prospect.website;
+
+  // Strategy 1: Hunter.io via known website
+  if (website) {
+    const hunterResult = await findEmailHunter(website);
+    if (hunterResult) {
+      const emails = extractEmailsFromText(hunterResult);
+      if (emails.length) return emails[0];
+    }
+  }
+
+  // Strategy 2: Scrape the website contact page for emails
+  if (website) {
+    const baseUrl = website.replace(/\/$/, "");
+    for (const path of ["", "/contacto", "/contact", "/sobre-nosotros", "/about"]) {
+      try {
+        const html = await fetchWebContent(baseUrl + path);
+        const emails = extractEmailsFromText(html);
+        if (emails.length) return emails[0];
+      } catch { /* skip */ }
+    }
+  }
+
+  // Strategy 3: Find the website first if Google Places didn't include one
+  if (!website) {
+    const siteSearch = await searchWeb(`"${prospect.name}" ${country} sitio web oficial`, 4);
+    const urlMatch = siteSearch.match(/URL:\s*(https?:\/\/(?!.*(?:yelp|tripadvisor|facebook|instagram\.com|linkedin|twitter|google\.|wikipedia))[^\s\n]+)/i);
+    if (urlMatch) {
+      website = urlMatch[1].trim();
+      const hunterResult = await findEmailHunter(website);
+      if (hunterResult) {
+        const emails = extractEmailsFromText(hunterResult);
+        if (emails.length) return emails[0];
+      }
+      // Also scrape the found website
+      try {
+        const html = await fetchWebContent(website);
+        const emails = extractEmailsFromText(html);
+        if (emails.length) return emails[0];
+      } catch { /* skip */ }
+    }
+  }
+
+  // Strategy 4: Web search specifically for email address
+  const emailSearch = await searchWeb(`"${prospect.name}" email OR "@" contacto OR contact ${country}`, 5);
+  const emails = extractEmailsFromText(emailSearch);
+  if (emails.length) return emails[0];
+
+  return null;
+}
 
 async function extractProspectsFromSearch(query, count) {
   const prospects = [];
   const placesResult = await searchPlaces(query);
   if (placesResult) {
     const entries = placesResult.split(/\n\n/);
-    for (const entry of entries.slice(0, count + 3)) {
+    for (const entry of entries.slice(0, count + 5)) {
       const lines = entry.split("\n");
       const name = lines[0]?.replace(/^\d+\.\s*/, "").trim();
       const details = lines[1] || "";
@@ -1996,8 +2059,8 @@ async function extractProspectsFromSearch(query, count) {
 async function generateAutoEmailContent(businessName, sector, language) {
   try {
     const prompt = language === "en"
-      ? `Write a brief cold email for ${businessName} (${sector} sector) from XORA, an AI visual content agency. XORA creates professional photos and videos with AI—no photography needed. Website: https://xoralab.com. RULES: No prices or delivery times. Personalized for ${businessName}. Max 5 short paragraphs. Catchy, specific subject line. Respond ONLY with valid JSON (no markdown, no explanation): {"subject":"...","body":"..."}`
-      : `Escribe un email de prospección breve para ${businessName} (sector: ${sector}) de parte de XORA, agencia de contenido visual con IA. XORA crea fotos y vídeos profesionales con IA, sin sesiones fotográficas. Web: https://xoralab.com. REGLAS: Sin precios ni tiempos de entrega. Personalizado para ${businessName}. Máximo 5 párrafos cortos. Asunto con gancho específico. Responde SOLO con JSON válido (sin markdown, sin explicación): {"subject":"...","body":"..."}`;
+      ? `Write a brief cold email for ${businessName} (${sector} sector) from XORA, an AI visual content agency. XORA creates professional photos and videos with AI—no photography needed. Website: https://xoralab.com. RULES: No prices or delivery times. Personalized for ${businessName}. Max 5 short paragraphs. Catchy, specific subject line. Respond ONLY with valid JSON (no markdown): {"subject":"...","body":"..."}`
+      : `Escribe un email de prospección breve para ${businessName} (sector: ${sector}) de parte de XORA, agencia de contenido visual con IA. XORA crea fotos y vídeos profesionales con IA, sin sesiones fotográficas. Web: https://xoralab.com. REGLAS: Sin precios ni tiempos de entrega. Personalizado para ${businessName}. Máximo 5 párrafos cortos. Asunto con gancho específico. Responde SOLO con JSON válido (sin markdown): {"subject":"...","body":"..."}`;
 
     const response = await claude.messages.create({
       model: "claude-haiku-4-5-20251001",
@@ -2006,7 +2069,7 @@ async function generateAutoEmailContent(businessName, sector, language) {
     });
 
     const text = response.content.find(b => b.type === "text")?.text || "";
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const jsonMatch = text.match(/\{[\s\S]*?\}/);
     if (!jsonMatch) return null;
     return JSON.parse(jsonMatch[0]);
   } catch (err) {
@@ -2036,37 +2099,36 @@ async function runAutoBuscar(userId, chatId) {
 
       let prospects;
       try {
-        prospects = await extractProspectsFromSearch(query, perSectorPerCountry + 2);
+        prospects = await extractProspectsFromSearch(query, perSectorPerCountry + 3);
       } catch (err) {
         console.error(`Error buscando ${sector.name} en ${country}:`, err.message);
         continue;
       }
 
+      // Show what we found (debug visibility)
+      if (prospects.length) {
+        await bot.sendMessage(chatId,
+          `🔎 *${sector.name} · ${country}*\nEncontradas: ${prospects.map(p => p.name).join(", ")}`,
+          { parse_mode: "Markdown" }
+        );
+      }
+
       for (const prospect of prospects.slice(0, perSectorPerCountry)) {
         if (sent + skipped >= 30) break;
+        await bot.sendChatAction(chatId, "typing");
 
-        // Find email via Hunter.io or web search
-        let email = null;
-        if (prospect.website) {
-          const hunterResult = await findEmailHunter(prospect.website);
-          if (hunterResult) {
-            const m = hunterResult.match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/);
-            email = m?.[1];
-          }
-        }
-        if (!email) {
-          const webSearch = await searchWeb(`"${prospect.name}" email contacto ${country}`, 3);
-          const m = webSearch.match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/);
-          email = m?.[1];
+        const email = await findBestEmail(prospect, country);
+        console.log(`[buscar] ${prospect.name} → email: ${email || "no encontrado"}`);
+
+        if (!email || contactedEmails.has(email.toLowerCase())) {
+          console.log(`[buscar] Saltando ${prospect.name}: ${!email ? "sin email" : "ya contactado"}`);
+          skipped++;
+          continue;
         }
 
-        if (!email || contactedEmails.has(email.toLowerCase())) { skipped++; continue; }
-
-        // Generate email
         const content = await generateAutoEmailContent(prospect.name, sector.name, lang);
         if (!content?.subject || !content?.body) { skipped++; continue; }
 
-        // Send
         try {
           await sendEmail({ to: email, subject: content.subject, body: content.body });
           await saveClient({ name: prospect.name, email, status: "contactado", sector: sector.name, language: lang });
@@ -2078,6 +2140,7 @@ async function runAutoBuscar(userId, chatId) {
           );
         } catch (err) {
           console.error(`Error enviando a ${prospect.name}:`, err.message);
+          await bot.sendMessage(chatId, `⚠️ Error enviando a ${prospect.name}: ${err.message}`);
           skipped++;
           continue;
         }
@@ -2088,7 +2151,7 @@ async function runAutoBuscar(userId, chatId) {
   }
 
   await bot.sendMessage(chatId,
-    `✅ *Campaña /buscar completada*\n\n📤 Emails enviados: ${sent}\n⏭️ Saltados (sin email o ya contactados): ${skipped}\n\nUsa /clientes para ver el estado de todos.`,
+    `✅ *Campaña /buscar completada*\n\n📤 Emails enviados: ${sent}\n⏭️ Saltados: ${skipped} (sin email o ya contactados)\n\nUsa /clientes para ver el estado de todos.`,
     { parse_mode: "Markdown" }
   );
 }
