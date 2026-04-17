@@ -2183,11 +2183,11 @@ async function generateAutoEmailContent(businessName, sector, language, context 
 
     const enzoLine = isFemale
       ? (language === "en"
-          ? "2. **With your own photos** — you send your models or products and we elevate them with AI to shine on Instagram, your website and ads."
-          : "2. **Con vuestras propias fotos** — nos mandáis vuestras fotos o modelos y las elevamos con IA para que brillen en Instagram, web y campañas.")
+          ? "2. Con vuestras propias fotos — nos mandáis vuestras fotos o modelos y las elevamos con IA para que brillen en Instagram, web y campañas."
+          : "2. Con vuestras propias fotos — nos mandáis vuestras fotos o modelos y las elevamos con IA para que brillen en Instagram, web y campañas.")
       : (language === "en"
-          ? "1. **With Enzo** (@enzowalkerr), our virtual male model — ideal for your product or lifestyle line.\n2. **With your own photos** — we elevate them with AI for Instagram, web and ads."
-          : "1. **Con Enzo** (@enzowalkerr), nuestro modelo virtual masculino — perfecto para vuestras prendas o producto.\n2. **Con vuestras propias fotos** — las elevamos con IA para que brillen en Instagram, web y campañas.");
+          ? "1. Con Enzo (@enzowalkerr), our virtual male model — ideal for your product or lifestyle line.\n2. Con vuestras propias fotos — las elevamos con IA para que brillen en Instagram, web y campañas."
+          : "1. Con Enzo (@enzowalkerr), nuestro modelo virtual masculino — perfecto para vuestras prendas o producto.\n2. Con vuestras propias fotos — las elevamos con IA para que brillen en Instagram, web y campañas.");
 
     const signatureES = `Marcos\nXora - Agencia de contenido con IA\nxoralab.com | contacto@xoralab.com`;
     const signatureEN = `Marcos\nXora - AI Visual Content Agency\nxoralab.com | contacto@xoralab.com`;
@@ -2204,15 +2204,16 @@ MANDATORY EMAIL STRUCTURE — follow exactly:
 3. Analysis paragraph (2-3 sentences): show you researched them — mention specific details you found (followers, locations, products, what their content looks like). Be honest and direct about what's missing visually.
 4. One statistic about visual content and purchasing decisions.
 5. XORA pitch paragraph: "At XORA we create professional-quality photos and videos with artificial intelligence." Then: ${enzoLine}
-6. CTA: "Take a look at **https://xoralab.com** — [one sentence teaser for their sector]. If you're interested, reply here or drop us a DM on Instagram." No phone calls or video calls.
+6. CTA: "Take a look at https://xoralab.com — [one sentence teaser for their sector]. If you're interested, reply here or drop us a DM on Instagram." No phone calls or video calls.
 7. Signature: ${signatureEN}
 
 RULES:
 - No prices or delivery times ever
-- Never mention calls, phone or video meetings — WhatsApp or Instagram DM is fine as contact option
+- Never mention calls or video meetings — WhatsApp or Instagram DM is fine
 - Sound like a real human, not a marketing email
 - Be specific — generic emails get deleted
 - Keep it concise (under 200 words body)
+- PLAIN TEXT ONLY: no asterisks, no markdown bold (**text**), no dashes as separators, no bullet symbols. Just clean paragraphs. Numbered lists (1. 2.) are fine.
 
 Respond ONLY with valid JSON (no markdown, no explanation):
 {"subject":"...","body":"..."}`
@@ -2227,16 +2228,17 @@ ESTRUCTURA OBLIGATORIA DEL EMAIL — sigue exactamente este orden:
 3. Párrafo de análisis (2-3 frases): demuestra que les has investigado — menciona detalles específicos que hayas encontrado (seguidores, locales, productos, marcas que llevan, cómo es su contenido visual ahora). Sé honesto y directo sobre lo que falta visualmente.
 4. Una estadística sobre contenido visual y decisiones de compra.
 5. Pitch de XORA: "En XORA creamos fotos y vídeos de calidad profesional con inteligencia artificial." Luego: ${enzoLine}
-6. CTA: "Echa un vistazo a **https://xoralab.com** — [una frase de gancho específica para su sector]. Si os interesa, respondéis aquí o nos escribís por WhatsApp o por Instagram." Sin llamadas ni videollamadas.
+6. CTA: "Echa un vistazo a https://xoralab.com — [una frase de gancho específica para su sector]. Si os interesa, respondéis aquí o nos escribís por WhatsApp o por Instagram." Sin llamadas ni videollamadas.
 7. Firma: ${signatureES}
 
 REGLAS ABSOLUTAS:
 - Nunca precios ni tiempos de entrega
-- Nunca menciones llamadas ni videollamadas — WhatsApp o DM de Instagram sí están bien como opción de contacto
+- Nunca menciones llamadas ni videollamadas — WhatsApp o DM de Instagram sí están bien
 - Suena como una persona real, no como un email de marketing
 - Sé específico — los emails genéricos se borran
 - Cuerpo bajo 200 palabras
 - Usa "vosotros" para España, "ustedes" para México/LATAM
+- TEXTO PLANO: sin asteriscos, sin markdown (**texto**), sin guiones como separadores, sin símbolos de viñeta. Solo párrafos limpios. Las listas numeradas (1. 2.) sí están bien.
 
 Responde SOLO con JSON válido (sin markdown, sin explicación):
 {"subject":"...","body":"..."}`;
