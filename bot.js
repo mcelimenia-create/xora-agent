@@ -2047,11 +2047,27 @@ function extractEmailsFromText(text) {
   );
 }
 
-// Multi-strategy email finder for a prospect
+const SKIP_URL = /yelp|tripadvisor|facebook\.com|instagram\.com|linkedin|twitter|google\.|wikipedia|booking\.com|foursquare|pages\.google|maps\.google/i;
+
+// Multi-strategy email finder — exhaustive, always returns something if we have a domain
 async function findBestEmail(prospect, country) {
   let website = prospect.website;
 
-  // Strategy 1: Hunter.io via known website
+  // Step 1: find the website if we don't have one yet
+  if (!website) {
+    const isEs = ["España", "México"].includes(country);
+    const q = isEs
+      ? `"${prospect.name}" sitio web oficial ${country}`
+      : `"${prospect.name}" official website ${country}`;
+    const res = await searchWeb(q, 6);
+    const urlMatches = [...res.matchAll(/URL:\s*(https?:\/\/[^\s\n]+)/gi)];
+    for (const m of urlMatches) {
+      const u = m[1].trim();
+      if (!SKIP_URL.test(u)) { website = u; break; }
+    }
+  }
+
+  // Step 2: Hunter.io domain search (high confidence)
   if (website) {
     const hunterResult = await findEmailHunter(website);
     if (hunterResult) {
@@ -2060,73 +2076,86 @@ async function findBestEmail(prospect, country) {
     }
   }
 
-  // Strategy 2: Scrape the website contact page for emails
+  // Step 3: Scrape website pages — prioritise mailto: links
   if (website) {
-    const baseUrl = website.replace(/\/$/, "");
-    for (const path of ["", "/contacto", "/contact", "/sobre-nosotros", "/about"]) {
+    const base = website.replace(/\/$/, "");
+    const paths = ["", "/contacto", "/contact", "/sobre-nosotros", "/about", "/info", "/equipo", "/team", "/impressum"];
+    for (const path of paths) {
       try {
-        const html = await fetchWebContent(baseUrl + path);
+        const html = await fetchWebContent(base + path);
+        // mailto: links are most reliable
+        const mailtoMatches = html.match(/mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi) || [];
+        for (const m of mailtoMatches) {
+          const email = m.replace(/^mailto:/i, "");
+          if (!email.match(/noreply|no-reply|donotreply|example|cloudflare|sentry/i)) return email;
+        }
+        // Plain emails in text
         const emails = extractEmailsFromText(html);
         if (emails.length) return emails[0];
       } catch { /* skip */ }
     }
   }
 
-  // Strategy 3: Find the website first if Google Places didn't include one
-  if (!website) {
-    const siteSearch = await searchWeb(`"${prospect.name}" ${country} sitio web oficial`, 4);
-    const urlMatch = siteSearch.match(/URL:\s*(https?:\/\/(?!.*(?:yelp|tripadvisor|facebook|instagram\.com|linkedin|twitter|google\.|wikipedia))[^\s\n]+)/i);
-    if (urlMatch) {
-      website = urlMatch[1].trim();
-      const hunterResult = await findEmailHunter(website);
-      if (hunterResult) {
-        const emails = extractEmailsFromText(hunterResult);
-        if (emails.length) return emails[0];
-      }
-      // Also scrape the found website
-      try {
-        const html = await fetchWebContent(website);
-        const emails = extractEmailsFromText(html);
-        if (emails.length) return emails[0];
-      } catch { /* skip */ }
-    }
+  // Step 4: Brave search with email-specific patterns
+  const name = prospect.name;
+  for (const q of [
+    `"${name}" email`,
+    `"${name}" "@gmail.com" OR "@hotmail.com" OR "@outlook.com"`,
+    `"${name}" contacto email ${country}`,
+  ]) {
+    const res = await searchWeb(q, 5);
+    const emails = extractEmailsFromText(res);
+    if (emails.length) return emails[0];
   }
 
-  // Strategy 4: Web search specifically for email address
-  const emailSearch = await searchWeb(`"${prospect.name}" email OR "@" contacto OR contact ${country}`, 5);
-  const emails = extractEmailsFromText(emailSearch);
-  if (emails.length) return emails[0];
+  // Step 5: Domain pattern guessing — same as Apollo/Hunter/Lemlist do
+  if (website) {
+    const domain = website.replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+    if (domain && domain.includes(".")) {
+      const prefix = ["España", "México"].includes(country) ? "info" : "info";
+      return `${prefix}@${domain}`;
+    }
+  }
 
   return null;
 }
 
 async function extractProspectsFromSearch(query, count) {
   const prospects = [];
+  const seen = new Set();
+
+  // Try Google Places first (structured, has websites)
   const placesResult = await searchPlaces(query);
   if (placesResult) {
     const entries = placesResult.split(/\n\n/);
-    for (const entry of entries.slice(0, count + 5)) {
+    for (const entry of entries) {
       const lines = entry.split("\n");
       const name = lines[0]?.replace(/^\d+\.\s*/, "").trim();
       const details = lines[1] || "";
       const webMatch = details.match(/🌐\s*(https?:\/\/[^\s|]+)/);
-      if (name) prospects.push({ name, website: webMatch?.[1]?.trim() });
+      if (name && !seen.has(name.toLowerCase())) {
+        seen.add(name.toLowerCase());
+        prospects.push({ name, website: webMatch?.[1]?.trim() });
+      }
       if (prospects.length >= count) break;
     }
-  } else {
-    const webResult = await searchWeb(query, count * 2);
-    const entries = webResult.split(/\n\n/);
-    for (const entry of entries) {
-      const lines = entry.split("\n");
-      const name = lines[0]?.replace(/^\d+\.\s*/, "").trim();
-      const urlLine = lines.find(l => l.startsWith("URL:"));
-      const url = urlLine?.replace("URL:", "").trim();
-      if (name && url && !url.match(/yelp|tripadvisor|facebook\.com|instagram\.com|linkedin|twitter|google\.|wikipedia/i)) {
-        prospects.push({ name, website: url });
-        if (prospects.length >= count) break;
-      }
+  }
+
+  // Always also run a Brave search and merge results (more variety)
+  const webResult = await searchWeb(query, 10);
+  const entries = webResult.split(/\n\n/);
+  for (const entry of entries) {
+    if (prospects.length >= count + 4) break;
+    const lines = entry.split("\n");
+    const name = lines[0]?.replace(/^\d+\.\s*/, "").trim();
+    const urlLine = lines.find(l => l.startsWith("URL:"));
+    const url = urlLine?.replace("URL:", "").trim();
+    if (name && url && !SKIP_URL.test(url) && !seen.has(name.toLowerCase())) {
+      seen.add(name.toLowerCase());
+      prospects.push({ name, website: url });
     }
   }
+
   return prospects;
 }
 
@@ -2167,17 +2196,17 @@ async function runAutoBuscar(userId, chatId) {
   let skipped = 0;
 
   // Pick 10 random templates and build a unique query for each (different city every time)
-  const targets = shuffleArray(BUSCAR_TEMPLATES).slice(0, 10).map(buildBuscarQuery);
+  const targets = shuffleArray(BUSCAR_TEMPLATES).slice(0, 13).map(buildBuscarQuery);
   // Track emails already sent THIS run to avoid duplicates within the campaign
   const sentThisRun = new Set();
 
   for (const target of targets) {
-    if (sent >= 30) break;
+    if (sent >= 50) break;
     await bot.sendChatAction(chatId, "typing");
 
     let prospects;
     try {
-      prospects = await extractProspectsFromSearch(target.query, 5);
+      prospects = await extractProspectsFromSearch(target.query, 8);
     } catch (err) {
       console.error(`Error buscando ${target.name}:`, err.message);
       continue;
@@ -2185,13 +2214,15 @@ async function runAutoBuscar(userId, chatId) {
 
     if (prospects.length) {
       await bot.sendMessage(chatId,
-        `🔎 *${target.name}*\n${prospects.map(p => `• ${p.name}`).join("\n")}`,
+        `🔎 *${target.name}*\n${prospects.slice(0, 6).map(p => `• ${p.name}`).join("\n")}`,
         { parse_mode: "Markdown" }
       );
     }
 
-    for (const prospect of prospects.slice(0, 3)) {
-      if (sent >= 30) break;
+    let sentThisBatch = 0;
+    for (const prospect of prospects) {
+      // Max 3 sends per target batch; stop whole campaign at 30
+      if (sent >= 50 || sentThisBatch >= 4) break;
       await bot.sendChatAction(chatId, "typing");
 
       const email = await findBestEmail(prospect, target.country);
@@ -2210,8 +2241,9 @@ async function runAutoBuscar(userId, chatId) {
         await saveClient({ name: prospect.name, email, status: "contactado", sector: target.name, language: target.lang });
         sentThisRun.add(email.toLowerCase());
         sent++;
+        sentThisBatch++;
         await bot.sendMessage(chatId,
-          `📤 *${sent}* — ${prospect.name} (${target.country})\n📧 ${email}`,
+          `📤 *${sent}/50* — ${prospect.name} (${target.country})\n📧 ${email}`,
           { parse_mode: "Markdown" }
         );
       } catch (err) {
@@ -2226,7 +2258,7 @@ async function runAutoBuscar(userId, chatId) {
   }
 
   await bot.sendMessage(chatId,
-    `✅ *Campaña completada*\n\n📤 Enviados: ${sent}\n⏭️ Saltados (sin email): ${skipped}\n\nLlama a /buscar otra vez para una nueva ronda con empresas distintas.`,
+    `✅ *Campaña completada*\n\n📤 Enviados: ${sent}/50\n⏭️ Saltados (sin email): ${skipped}\n\nLlama a /buscar otra vez para una nueva ronda con empresas distintas.`,
     { parse_mode: "Markdown" }
   );
 }
@@ -2238,7 +2270,7 @@ bot.onText(/\/buscar/, async (msg) => {
     return;
   }
   bot.sendMessage(msg.chat.id,
-    "🔍 *Iniciando campaña automática*\n\nBusco 30 empresas en 5 sectores (15 España + 15 USA) y les mando email en automático. Te iré informando del progreso.",
+    "🔍 *Iniciando campaña automática*\n\nBusco 50 empresas en distintos sectores y países y les mando email en automático. Te iré informando del progreso.",
     { parse_mode: "Markdown" }
   );
   runAutoBuscar(msg.from.id, msg.chat.id).catch(err => {
