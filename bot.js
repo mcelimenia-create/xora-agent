@@ -135,6 +135,26 @@ const pendingEmails = new Map();
 
 const prospectQueues = new Map();
 
+async function loadProspectQueue(userId) {
+  if (prospectQueues.has(userId)) return prospectQueues.get(userId);
+  if (!redis) return null;
+  try {
+    const saved = JSON.parse(await redis.get(`xora:queue:${userId}`) || "null");
+    if (saved) prospectQueues.set(userId, saved);
+    return saved;
+  } catch { return null; }
+}
+
+async function saveProspectQueue(userId, queue) {
+  prospectQueues.set(userId, queue);
+  if (redis) await redis.set(`xora:queue:${userId}`, JSON.stringify(queue));
+}
+
+async function deleteProspectQueue(userId) {
+  prospectQueues.delete(userId);
+  if (redis) await redis.del(`xora:queue:${userId}`);
+}
+
 // ── SYSTEM PROMPT ─────────────────────────────────────────
 
 const SYSTEM_PROMPT = `Eres el asistente personal de Marcos, fundador de XORA, una agencia de contenido visual con IA para marcas y negocios.
@@ -1077,7 +1097,7 @@ async function runTool(name, input, userId) {
     }
     case "save_prospect_list": {
       const items = (input.prospects || []).filter(p => p.name);
-      prospectQueues.set(userId, { items, index: 0 });
+      await saveProspectQueue(userId, { items, index: 0 });
       return `Cola guardada con ${items.length} prospectos. Índice actual: 0. Di "empieza" para analizar el primero.`;
     }
     default:
@@ -1199,7 +1219,9 @@ async function askClaude(messages, userId) {
   const lastUserText = typeof lastUserContent === "string" ? lastUserContent : "";
   const systemPrompt = await buildSystemPrompt(lastUserText);
 
-  while (true) {
+  let iterations = 0;
+  const MAX_ITERATIONS = 20;
+  while (iterations++ < MAX_ITERATIONS) {
     const response = await claude.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 4096,
@@ -1748,17 +1770,17 @@ bot.onText(/\/enviar/, async (msg) => {
     );
 
     // ── AUTO-ADVANCE prospect queue ────────────────────────
-    const queue = prospectQueues.get(msg.from.id);
+    const queue = await loadProspectQueue(msg.from.id);
     if (!queue) return;
 
     queue.index++;
     if (queue.index >= queue.items.length) {
-      prospectQueues.delete(msg.from.id);
+      await deleteProspectQueue(msg.from.id);
       await bot.sendMessage(msg.chat.id, "🎉 Has completado todas las empresas de la lista.");
       return;
     }
 
-    prospectQueues.set(msg.from.id, queue);
+    await saveProspectQueue(msg.from.id, queue);
     const next = queue.items[queue.index];
     await bot.sendMessage(msg.chat.id,
       `➡️ Siguiente (${queue.index + 1}/${queue.items.length}): *${next.name}*. Analizando...`,
@@ -1791,17 +1813,17 @@ bot.onText(/\/cancelar/, (msg) => {
 bot.onText(/\/saltar/, async (msg) => {
   if (!isAuthorized(msg.from.id)) return;
   pendingEmails.delete(msg.from.id);
-  const queue = prospectQueues.get(msg.from.id);
+  const queue = await loadProspectQueue(msg.from.id);
   if (!queue) { bot.sendMessage(msg.chat.id, "No hay ninguna cola activa."); return; }
 
   queue.index++;
   if (queue.index >= queue.items.length) {
-    prospectQueues.delete(msg.from.id);
+    await deleteProspectQueue(msg.from.id);
     await bot.sendMessage(msg.chat.id, "Lista completada.");
     return;
   }
 
-  prospectQueues.set(msg.from.id, queue);
+  await saveProspectQueue(msg.from.id, queue);
   const next = queue.items[queue.index];
   await bot.sendMessage(msg.chat.id,
     `⏭️ Saltada. Siguiente (${queue.index + 1}/${queue.items.length}): *${next.name}*. Analizando...`,
@@ -1931,4 +1953,159 @@ bot.on("message", async (msg) => {
   }
 });
 
-console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | presupuestos ✓`);
+// ── /buscar AUTO-CAMPAIGN ─────────────────────────────────
+
+const BUSCAR_SECTORS = [
+  { name: "moda y ropa",         queryES: "tienda moda ropa boutique Instagram España",          queryUS: "fashion clothing boutique brand Instagram USA" },
+  { name: "restaurante",         queryES: "restaurante cafetería bar Instagram España",           queryUS: "restaurant cafe bar Instagram USA" },
+  { name: "fitness y gimnasio",  queryES: "gimnasio boutique fitness entrenador España",          queryUS: "boutique gym fitness studio USA" },
+  { name: "ecommerce",           queryES: "tienda online ecommerce producto España Instagram",    queryUS: "ecommerce online shop small brand USA Instagram" },
+  { name: "belleza y cosmética", queryES: "clínica estética belleza cosmética España Instagram",  queryUS: "beauty spa aesthetics cosmetics brand USA Instagram" },
+];
+
+async function extractProspectsFromSearch(query, count) {
+  const prospects = [];
+  const placesResult = await searchPlaces(query);
+  if (placesResult) {
+    const entries = placesResult.split(/\n\n/);
+    for (const entry of entries.slice(0, count + 3)) {
+      const lines = entry.split("\n");
+      const name = lines[0]?.replace(/^\d+\.\s*/, "").trim();
+      const details = lines[1] || "";
+      const webMatch = details.match(/🌐\s*(https?:\/\/[^\s|]+)/);
+      if (name) prospects.push({ name, website: webMatch?.[1]?.trim() });
+      if (prospects.length >= count) break;
+    }
+  } else {
+    const webResult = await searchWeb(query, count * 2);
+    const entries = webResult.split(/\n\n/);
+    for (const entry of entries) {
+      const lines = entry.split("\n");
+      const name = lines[0]?.replace(/^\d+\.\s*/, "").trim();
+      const urlLine = lines.find(l => l.startsWith("URL:"));
+      const url = urlLine?.replace("URL:", "").trim();
+      if (name && url && !url.match(/yelp|tripadvisor|facebook\.com|instagram\.com|linkedin|twitter|google\.|wikipedia/i)) {
+        prospects.push({ name, website: url });
+        if (prospects.length >= count) break;
+      }
+    }
+  }
+  return prospects;
+}
+
+async function generateAutoEmailContent(businessName, sector, language) {
+  try {
+    const prompt = language === "en"
+      ? `Write a brief cold email for ${businessName} (${sector} sector) from XORA, an AI visual content agency. XORA creates professional photos and videos with AI—no photography needed. Website: https://xoralab.com. RULES: No prices or delivery times. Personalized for ${businessName}. Max 5 short paragraphs. Catchy, specific subject line. Respond ONLY with valid JSON (no markdown, no explanation): {"subject":"...","body":"..."}`
+      : `Escribe un email de prospección breve para ${businessName} (sector: ${sector}) de parte de XORA, agencia de contenido visual con IA. XORA crea fotos y vídeos profesionales con IA, sin sesiones fotográficas. Web: https://xoralab.com. REGLAS: Sin precios ni tiempos de entrega. Personalizado para ${businessName}. Máximo 5 párrafos cortos. Asunto con gancho específico. Responde SOLO con JSON válido (sin markdown, sin explicación): {"subject":"...","body":"..."}`;
+
+    const response = await claude.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 800,
+      messages: [{ role: "user", content: prompt }]
+    });
+
+    const text = response.content.find(b => b.type === "text")?.text || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    return JSON.parse(jsonMatch[0]);
+  } catch (err) {
+    console.error("Error generando email auto:", err.message);
+    return null;
+  }
+}
+
+async function runAutoBuscar(userId, chatId) {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let sent = 0;
+  let skipped = 0;
+  const perSectorPerCountry = 3; // 5 sectores × 3 × 2 países = 30
+
+  const clients = await loadClients();
+  const contactedEmails = new Set(
+    Object.values(clients).map(c => c.email?.toLowerCase()).filter(Boolean)
+  );
+
+  for (const sector of BUSCAR_SECTORS) {
+    for (const [country, query, lang] of [
+      ["España", sector.queryES, "es"],
+      ["USA",    sector.queryUS, "en"],
+    ]) {
+      if (sent + skipped >= 30) break;
+      await bot.sendChatAction(chatId, "typing");
+
+      let prospects;
+      try {
+        prospects = await extractProspectsFromSearch(query, perSectorPerCountry + 2);
+      } catch (err) {
+        console.error(`Error buscando ${sector.name} en ${country}:`, err.message);
+        continue;
+      }
+
+      for (const prospect of prospects.slice(0, perSectorPerCountry)) {
+        if (sent + skipped >= 30) break;
+
+        // Find email via Hunter.io or web search
+        let email = null;
+        if (prospect.website) {
+          const hunterResult = await findEmailHunter(prospect.website);
+          if (hunterResult) {
+            const m = hunterResult.match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/);
+            email = m?.[1];
+          }
+        }
+        if (!email) {
+          const webSearch = await searchWeb(`"${prospect.name}" email contacto ${country}`, 3);
+          const m = webSearch.match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/);
+          email = m?.[1];
+        }
+
+        if (!email || contactedEmails.has(email.toLowerCase())) { skipped++; continue; }
+
+        // Generate email
+        const content = await generateAutoEmailContent(prospect.name, sector.name, lang);
+        if (!content?.subject || !content?.body) { skipped++; continue; }
+
+        // Send
+        try {
+          await sendEmail({ to: email, subject: content.subject, body: content.body });
+          await saveClient({ name: prospect.name, email, status: "contactado", sector: sector.name, language: lang });
+          contactedEmails.add(email.toLowerCase());
+          sent++;
+          await bot.sendMessage(chatId,
+            `📤 *${sent}/30* — ${prospect.name} (${country})\n📧 ${email}`,
+            { parse_mode: "Markdown" }
+          );
+        } catch (err) {
+          console.error(`Error enviando a ${prospect.name}:`, err.message);
+          skipped++;
+          continue;
+        }
+
+        await sleep(3000);
+      }
+    }
+  }
+
+  await bot.sendMessage(chatId,
+    `✅ *Campaña /buscar completada*\n\n📤 Emails enviados: ${sent}\n⏭️ Saltados (sin email o ya contactados): ${skipped}\n\nUsa /clientes para ver el estado de todos.`,
+    { parse_mode: "Markdown" }
+  );
+}
+
+bot.onText(/\/buscar/, async (msg) => {
+  if (!isAuthorized(msg.from.id)) return;
+  if (!RESEND_API_KEY) {
+    bot.sendMessage(msg.chat.id, "❌ Falta RESEND_API_KEY para enviar emails.");
+    return;
+  }
+  bot.sendMessage(msg.chat.id,
+    "🔍 *Iniciando campaña automática*\n\nBusco 30 empresas en 5 sectores (15 España + 15 USA) y les mando email en automático. Te iré informando del progreso.",
+    { parse_mode: "Markdown" }
+  );
+  runAutoBuscar(msg.from.id, msg.chat.id).catch(err => {
+    bot.sendMessage(msg.chat.id, `❌ Error en /buscar: ${err.message}`);
+  });
+});
+
+console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | presupuestos ✓ | /buscar ✓`);
