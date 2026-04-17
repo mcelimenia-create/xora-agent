@@ -1955,12 +1955,48 @@ bot.on("message", async (msg) => {
 
 // ── /buscar AUTO-CAMPAIGN ─────────────────────────────────
 
-const BUSCAR_SECTORS = [
-  { name: "moda y ropa",         queryES: "tienda moda ropa boutique España",          queryUS: "fashion clothing boutique brand USA" },
-  { name: "restaurante",         queryES: "restaurante cafetería bar España contacto",  queryUS: "restaurant cafe bar USA contact" },
-  { name: "fitness y gimnasio",  queryES: "gimnasio boutique fitness España",           queryUS: "boutique gym fitness studio USA" },
-  { name: "ecommerce",           queryES: "tienda online ecommerce España marca",       queryUS: "ecommerce online shop brand USA" },
-  { name: "belleza y cosmética", queryES: "clínica estética belleza España",            queryUS: "beauty spa aesthetics cosmetics USA" },
+// Large pool — each /buscar picks 10 random combos → never repeats the same run twice
+const BUSCAR_POOL = [
+  // España
+  { name: "moda España",          query: "tienda moda ropa boutique España",                  lang: "es", country: "España" },
+  { name: "restaurante España",   query: "restaurante bar cafetería España contacto email",   lang: "es", country: "España" },
+  { name: "fitness España",       query: "gimnasio boutique pilates yoga España",             lang: "es", country: "España" },
+  { name: "ecommerce España",     query: "tienda online ecommerce marca España",              lang: "es", country: "España" },
+  { name: "belleza España",       query: "clínica estética belleza peluquería España",        lang: "es", country: "España" },
+  { name: "joyería España",       query: "joyería bisutería accesorios marca España",        lang: "es", country: "España" },
+  { name: "hotel España",         query: "hotel boutique hostal alojamiento España",          lang: "es", country: "España" },
+  { name: "fotografía España",    query: "fotógrafo estudio fotografía marca España",         lang: "es", country: "España" },
+  { name: "decoración España",    query: "tienda decoración hogar interiorismo España",       lang: "es", country: "España" },
+  { name: "alimentación España",  query: "marca alimentación producto gourmet España",        lang: "es", country: "España" },
+  { name: "surf/deporte España",  query: "tienda surf deporte outdoor España",                lang: "es", country: "España" },
+  { name: "inmobiliaria España",  query: "inmobiliaria agencia pisos casas España",           lang: "es", country: "España" },
+  { name: "peluquería España",    query: "peluquería barbería salón belleza España",          lang: "es", country: "España" },
+  { name: "tatuaje España",       query: "estudio tatuaje tattoo España",                     lang: "es", country: "España" },
+  { name: "consultoría España",   query: "consultoría agencia marketing digital España",      lang: "es", country: "España" },
+  // México / LATAM
+  { name: "moda México",          query: "tienda moda ropa boutique México marca",            lang: "es", country: "México" },
+  { name: "restaurante México",   query: "restaurante bar México contacto",                   lang: "es", country: "México" },
+  { name: "belleza México",       query: "spa estética belleza clínica México",               lang: "es", country: "México" },
+  { name: "ecommerce México",     query: "tienda online ecommerce México marca",              lang: "es", country: "México" },
+  { name: "fitness México",       query: "gimnasio crossfit yoga México",                     lang: "es", country: "México" },
+  // USA
+  { name: "fashion USA",          query: "fashion clothing boutique brand USA",               lang: "en", country: "USA" },
+  { name: "restaurant USA",       query: "restaurant cafe bistro USA contact email",          lang: "en", country: "USA" },
+  { name: "gym USA",              query: "boutique gym fitness studio yoga USA",              lang: "en", country: "USA" },
+  { name: "ecommerce USA",        query: "ecommerce online shop small brand USA",             lang: "en", country: "USA" },
+  { name: "beauty USA",           query: "beauty spa aesthetics salon brand USA",             lang: "en", country: "USA" },
+  { name: "jewelry USA",          query: "jewelry accessories handmade brand USA",            lang: "en", country: "USA" },
+  { name: "hotel USA",            query: "boutique hotel bed breakfast USA",                  lang: "en", country: "USA" },
+  { name: "food brand USA",       query: "food brand artisan product USA",                    lang: "en", country: "USA" },
+  { name: "surf/outdoor USA",     query: "surf outdoor sports brand USA",                     lang: "en", country: "USA" },
+  { name: "interior design USA",  query: "interior design decor home brand USA",              lang: "en", country: "USA" },
+  { name: "tattoo USA",           query: "tattoo studio artist USA",                          lang: "en", country: "USA" },
+  { name: "real estate USA",      query: "real estate agency luxury homes USA",               lang: "en", country: "USA" },
+  // UK
+  { name: "fashion UK",           query: "fashion clothing boutique brand UK",                lang: "en", country: "UK" },
+  { name: "restaurant UK",        query: "restaurant cafe bistro UK contact email",           lang: "en", country: "UK" },
+  { name: "beauty UK",            query: "beauty spa aesthetics salon brand UK",              lang: "en", country: "UK" },
+  { name: "gym UK",               query: "boutique gym fitness yoga studio UK",               lang: "en", country: "UK" },
 ];
 
 // Extract email addresses from raw HTML/text
@@ -2078,80 +2114,81 @@ async function generateAutoEmailContent(businessName, sector, language) {
   }
 }
 
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 async function runAutoBuscar(userId, chatId) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   let sent = 0;
   let skipped = 0;
-  const perSectorPerCountry = 3; // 5 sectores × 3 × 2 países = 30
 
-  const clients = await loadClients();
-  const contactedEmails = new Set(
-    Object.values(clients).map(c => c.email?.toLowerCase()).filter(Boolean)
-  );
+  // Pick 10 random categories from the pool (no repeats within same run)
+  const targets = shuffleArray(BUSCAR_POOL).slice(0, 10);
+  // Track emails already sent THIS run to avoid duplicates within the campaign
+  const sentThisRun = new Set();
 
-  for (const sector of BUSCAR_SECTORS) {
-    for (const [country, query, lang] of [
-      ["España", sector.queryES, "es"],
-      ["USA",    sector.queryUS, "en"],
-    ]) {
-      if (sent + skipped >= 30) break;
+  for (const target of targets) {
+    if (sent >= 30) break;
+    await bot.sendChatAction(chatId, "typing");
+
+    let prospects;
+    try {
+      prospects = await extractProspectsFromSearch(target.query, 5);
+    } catch (err) {
+      console.error(`Error buscando ${target.name}:`, err.message);
+      continue;
+    }
+
+    if (prospects.length) {
+      await bot.sendMessage(chatId,
+        `🔎 *${target.name}*\n${prospects.map(p => `• ${p.name}`).join("\n")}`,
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    for (const prospect of prospects.slice(0, 3)) {
+      if (sent >= 30) break;
       await bot.sendChatAction(chatId, "typing");
 
-      let prospects;
-      try {
-        prospects = await extractProspectsFromSearch(query, perSectorPerCountry + 3);
-      } catch (err) {
-        console.error(`Error buscando ${sector.name} en ${country}:`, err.message);
+      const email = await findBestEmail(prospect, target.country);
+      console.log(`[buscar] ${prospect.name} → ${email || "sin email"}`);
+
+      if (!email || sentThisRun.has(email.toLowerCase())) {
+        skipped++;
         continue;
       }
 
-      // Show what we found (debug visibility)
-      if (prospects.length) {
+      const content = await generateAutoEmailContent(prospect.name, target.name, target.lang);
+      if (!content?.subject || !content?.body) { skipped++; continue; }
+
+      try {
+        await sendEmail({ to: email, subject: content.subject, body: content.body });
+        await saveClient({ name: prospect.name, email, status: "contactado", sector: target.name, language: target.lang });
+        sentThisRun.add(email.toLowerCase());
+        sent++;
         await bot.sendMessage(chatId,
-          `🔎 *${sector.name} · ${country}*\nEncontradas: ${prospects.map(p => p.name).join(", ")}`,
+          `📤 *${sent}* — ${prospect.name} (${target.country})\n📧 ${email}`,
           { parse_mode: "Markdown" }
         );
+      } catch (err) {
+        console.error(`Error enviando a ${prospect.name}:`, err.message);
+        await bot.sendMessage(chatId, `⚠️ ${prospect.name}: ${err.message}`);
+        skipped++;
+        continue;
       }
 
-      for (const prospect of prospects.slice(0, perSectorPerCountry)) {
-        if (sent + skipped >= 30) break;
-        await bot.sendChatAction(chatId, "typing");
-
-        const email = await findBestEmail(prospect, country);
-        console.log(`[buscar] ${prospect.name} → email: ${email || "no encontrado"}`);
-
-        if (!email || contactedEmails.has(email.toLowerCase())) {
-          console.log(`[buscar] Saltando ${prospect.name}: ${!email ? "sin email" : "ya contactado"}`);
-          skipped++;
-          continue;
-        }
-
-        const content = await generateAutoEmailContent(prospect.name, sector.name, lang);
-        if (!content?.subject || !content?.body) { skipped++; continue; }
-
-        try {
-          await sendEmail({ to: email, subject: content.subject, body: content.body });
-          await saveClient({ name: prospect.name, email, status: "contactado", sector: sector.name, language: lang });
-          contactedEmails.add(email.toLowerCase());
-          sent++;
-          await bot.sendMessage(chatId,
-            `📤 *${sent}/30* — ${prospect.name} (${country})\n📧 ${email}`,
-            { parse_mode: "Markdown" }
-          );
-        } catch (err) {
-          console.error(`Error enviando a ${prospect.name}:`, err.message);
-          await bot.sendMessage(chatId, `⚠️ Error enviando a ${prospect.name}: ${err.message}`);
-          skipped++;
-          continue;
-        }
-
-        await sleep(3000);
-      }
+      await sleep(3000);
     }
   }
 
   await bot.sendMessage(chatId,
-    `✅ *Campaña /buscar completada*\n\n📤 Emails enviados: ${sent}\n⏭️ Saltados: ${skipped} (sin email o ya contactados)\n\nUsa /clientes para ver el estado de todos.`,
+    `✅ *Campaña completada*\n\n📤 Enviados: ${sent}\n⏭️ Saltados (sin email): ${skipped}\n\nLlama a /buscar otra vez para una nueva ronda con empresas distintas.`,
     { parse_mode: "Markdown" }
   );
 }
