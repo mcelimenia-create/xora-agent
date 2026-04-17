@@ -2159,20 +2159,96 @@ async function extractProspectsFromSearch(query, count) {
   return prospects;
 }
 
-async function generateAutoEmailContent(businessName, sector, language) {
+// Quick research on a business before writing the email
+async function getBusinessContext(businessName, website, country) {
+  const parts = [];
+  // Scrape their website briefly
+  if (website) {
+    try {
+      const html = await fetchWebContent(website);
+      parts.push(`WEB: ${html.slice(0, 1500)}`);
+    } catch { /* skip */ }
+  }
+  // One targeted web search
+  const q = `"${businessName}" ${country} Instagram seguidores redes sociales`;
+  const res = await searchWeb(q, 4);
+  parts.push(`BÚSQUEDA: ${res.slice(0, 1000)}`);
+  return parts.join("\n\n");
+}
+
+async function generateAutoEmailContent(businessName, sector, language, context = "") {
   try {
+    const isFemale = /mujer|women|femme|female|ladies|chica|niña|novia|bridal|lencería|lingerie/i.test(sector + context);
+    const isMale   = /hombre|men|homme|male|caballero|barbería|barber|gym|fitness|deporte/i.test(sector + context);
+
+    const enzoLine = isFemale
+      ? (language === "en"
+          ? "2. **With your own photos** — you send your models or products and we elevate them with AI to shine on Instagram, your website and ads."
+          : "2. **Con vuestras propias fotos** — nos mandáis vuestras fotos o modelos y las elevamos con IA para que brillen en Instagram, web y campañas.")
+      : (language === "en"
+          ? "1. **With Enzo** (@enzowalkerr), our virtual male model — ideal for your product or lifestyle line.\n2. **With your own photos** — we elevate them with AI for Instagram, web and ads."
+          : "1. **Con Enzo** (@enzowalkerr), nuestro modelo virtual masculino — perfecto para vuestras prendas o producto.\n2. **Con vuestras propias fotos** — las elevamos con IA para que brillen en Instagram, web y campañas.");
+
+    const signatureES = `Marcos\nXora - Agencia de contenido con IA\nxoralab.com | contacto@xoralab.com`;
+    const signatureEN = `Marcos\nXora - AI Visual Content Agency\nxoralab.com | contacto@xoralab.com`;
+
     const prompt = language === "en"
-      ? `Write a brief cold email for ${businessName} (${sector} sector) from XORA, an AI visual content agency. XORA creates professional photos and videos with AI—no photography needed. Website: https://xoralab.com. RULES: No prices or delivery times. Personalized for ${businessName}. Max 5 short paragraphs. Catchy, specific subject line. Respond ONLY with valid JSON (no markdown): {"subject":"...","body":"..."}`
-      : `Escribe un email de prospección breve para ${businessName} (sector: ${sector}) de parte de XORA, agencia de contenido visual con IA. XORA crea fotos y vídeos profesionales con IA, sin sesiones fotográficas. Web: https://xoralab.com. REGLAS: Sin precios ni tiempos de entrega. Personalizado para ${businessName}. Máximo 5 párrafos cortos. Asunto con gancho específico. Responde SOLO con JSON válido (sin markdown): {"subject":"...","body":"..."}`;
+      ? `You are writing a cold outreach email from XORA (AI visual content agency) to ${businessName} (${sector}).
+
+BUSINESS CONTEXT (use specific details from this):
+${context || "No context available — make reasonable assumptions based on the sector."}
+
+MANDATORY EMAIL STRUCTURE — follow exactly:
+1. Subject line: specific and curiosity-driven, mention something about their business. Never generic like "Collaboration" or "Proposal".
+2. Opening: "Hello ${businessName},"
+3. Analysis paragraph (2-3 sentences): show you researched them — mention specific details you found (followers, locations, products, what their content looks like). Be honest and direct about what's missing visually.
+4. One statistic about visual content and purchasing decisions.
+5. XORA pitch paragraph: "At XORA we create professional-quality photos and videos with artificial intelligence." Then: ${enzoLine}
+6. CTA: "Take a look at **https://xoralab.com** — [one sentence teaser for their sector]. If you're interested, reply here or drop us a DM on Instagram." No phone calls or video calls.
+7. Signature: ${signatureEN}
+
+RULES:
+- No prices or delivery times ever
+- Never mention calls, phone or video meetings — WhatsApp or Instagram DM is fine as contact option
+- Sound like a real human, not a marketing email
+- Be specific — generic emails get deleted
+- Keep it concise (under 200 words body)
+
+Respond ONLY with valid JSON (no markdown, no explanation):
+{"subject":"...","body":"..."}`
+      : `Eres Marcos, fundador de XORA (agencia de contenido visual con IA), escribiendo un email de prospección a ${businessName} (sector: ${sector}).
+
+CONTEXTO DEL NEGOCIO (usa detalles específicos de aquí):
+${context || "Sin contexto disponible — haz suposiciones razonables basadas en el sector."}
+
+ESTRUCTURA OBLIGATORIA DEL EMAIL — sigue exactamente este orden:
+1. Asunto: específico y con gancho, menciona algo de su negocio. NUNCA genérico como "Colaboración" o "Propuesta XORA".
+2. Saludo: "Hola ${businessName},"
+3. Párrafo de análisis (2-3 frases): demuestra que les has investigado — menciona detalles específicos que hayas encontrado (seguidores, locales, productos, marcas que llevan, cómo es su contenido visual ahora). Sé honesto y directo sobre lo que falta visualmente.
+4. Una estadística sobre contenido visual y decisiones de compra.
+5. Pitch de XORA: "En XORA creamos fotos y vídeos de calidad profesional con inteligencia artificial." Luego: ${enzoLine}
+6. CTA: "Echa un vistazo a **https://xoralab.com** — [una frase de gancho específica para su sector]. Si os interesa, respondéis aquí o nos escribís por WhatsApp o por Instagram." Sin llamadas ni videollamadas.
+7. Firma: ${signatureES}
+
+REGLAS ABSOLUTAS:
+- Nunca precios ni tiempos de entrega
+- Nunca menciones llamadas ni videollamadas — WhatsApp o DM de Instagram sí están bien como opción de contacto
+- Suena como una persona real, no como un email de marketing
+- Sé específico — los emails genéricos se borran
+- Cuerpo bajo 200 palabras
+- Usa "vosotros" para España, "ustedes" para México/LATAM
+
+Responde SOLO con JSON válido (sin markdown, sin explicación):
+{"subject":"...","body":"..."}`;
 
     const response = await claude.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 800,
+      max_tokens: 1200,
       messages: [{ role: "user", content: prompt }]
     });
 
     const text = response.content.find(b => b.type === "text")?.text || "";
-    const jsonMatch = text.match(/\{[\s\S]*?\}/);
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
     return JSON.parse(jsonMatch[0]);
   } catch (err) {
@@ -2233,7 +2309,8 @@ async function runAutoBuscar(userId, chatId) {
         continue;
       }
 
-      const content = await generateAutoEmailContent(prospect.name, target.name, target.lang);
+      const context = await getBusinessContext(prospect.name, prospect.website, target.country);
+      const content = await generateAutoEmailContent(prospect.name, target.name, target.lang, context);
       if (!content?.subject || !content?.body) { skipped++; continue; }
 
       try {
