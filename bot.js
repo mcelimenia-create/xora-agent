@@ -5,6 +5,8 @@ import Redis from "ioredis";
 import dotenv from "dotenv";
 import PDFDocument from "pdfkit";
 import OpenAI, { toFile } from "openai";
+import cron from "node-cron";
+import http from "http";
 
 
 dotenv.config();
@@ -21,6 +23,8 @@ const SITE_URL           = process.env.SITE_URL   || "https://xoralab.com";
 const ALLOWED_USER_ID    = process.env.ALLOWED_USER_ID ? parseInt(process.env.ALLOWED_USER_ID) : null;
 const AUTO_FOLLOWUP      = process.env.AUTO_FOLLOWUP === "true";
 const AUTO_FOLLOWUP_DAYS = parseInt(process.env.AUTO_FOLLOWUP_DAYS || "5");
+const WEBHOOK_PORT       = parseInt(process.env.WEBHOOK_PORT || process.env.PORT || "3000");
+const WEBHOOK_SECRET     = process.env.WEBHOOK_SECRET || "";
 
 if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
   console.error("Faltan TELEGRAM_TOKEN o ANTHROPIC_API_KEY");
@@ -38,6 +42,8 @@ const MEMORY_KEY        = "xora:memory";
 const CLIENTS_KEY       = "xora:clients";
 const PRICES_KEY        = "xora:prices";
 const TEMPLATES_KEY     = "xora:templates";
+const REMINDERS_KEY     = "xora:reminders";
+const EMAIL_MAP_KEY     = "xora:email_sent_map";
 
 // ── PRICE HELPERS ─────────────────────────────────────────
 
@@ -89,6 +95,39 @@ async function loadClients() {
 }
 async function saveClients(data) {
   if (redis) await redis.set(CLIENTS_KEY, JSON.stringify(data));
+}
+
+// ── REMINDERS ─────────────────────────────────────────────
+
+async function loadReminders() {
+  if (!redis) return [];
+  try { return JSON.parse(await redis.get(REMINDERS_KEY) || "[]"); } catch { return []; }
+}
+async function saveRemindersData(data) {
+  if (redis) await redis.set(REMINDERS_KEY, JSON.stringify(data));
+}
+async function setReminder({ userId, chatId, datetimeISO, text }) {
+  const reminders = await loadReminders();
+  const id = `rem_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  reminders.push({ id, userId, chatId, datetimeISO, text, done: false });
+  await saveRemindersData(reminders);
+  return id;
+}
+
+// ── EMAIL SENT MAP ────────────────────────────────────────
+
+async function loadEmailMap() {
+  if (!redis) return {};
+  try { return JSON.parse(await redis.get(EMAIL_MAP_KEY) || "{}"); } catch { return {}; }
+}
+async function saveEmailMap(data) {
+  if (redis) await redis.set(EMAIL_MAP_KEY, JSON.stringify(data));
+}
+async function storeEmailMapping(emailId, clientName, to) {
+  if (!emailId || !redis) return;
+  const map = await loadEmailMap();
+  map[emailId] = { clientName, to, sentAt: new Date().toISOString(), openedAt: null, clickedAt: null };
+  await saveEmailMap(map);
 }
 
 // ── CONVERSATION HISTORY ──────────────────────────────────
@@ -353,7 +392,14 @@ Después usa también update_price para mantener el CRM sincronizado.
 Genera directamente sin herramientas: posts, Reels, Stories, copies publicitarios, calendarios editoriales.
 
 ## Herramientas disponibles
-search_web, search_businesses (Google Maps + anti-duplicados), search_email (Hunter.io), analyze_business (Instagram incluido), prepare_email, save_client (con language), update_client (con language), get_clients, generate_proposal (es/en), update_price, update_web_price, save_template (con language), get_templates (filtro language), calculate_budget, save_memory
+search_web, search_businesses (Google Maps + anti-duplicados), search_email (Hunter.io), analyze_business (Instagram incluido), prepare_email, save_client (con language), update_client (con language), get_clients, generate_proposal (es/en), update_price, update_web_price, save_template (con language), get_templates (filtro language), calculate_budget, save_memory, set_reminder, get_reminders
+
+## Recordatorios
+Cuando Marcos diga "recuérdame", "avísame el lunes", "recuerda llamar a X el martes a las 10" o cualquier frase de recordatorio, usa set_reminder SIEMPRE.
+- Parsea la fecha relativa y conviértela a ISO 8601 con zona Europe/Madrid.
+- "El lunes" = próximo lunes; "mañana" = mañana; "el viernes a las 16h" = próximo viernes a las 16:00:00.
+- Confirma el recordatorio con la fecha exacta en español para que Marcos verifique: "Recordatorio guardado para el [día] a las [hora]."
+- Para listar los pendientes usa get_reminders.
 
 ## Estilo de respuesta
 Sé directo y conciso. Máximo 3-4 párrafos salvo análisis completo. Usa listas cuando estructuren mejor la información. Sin frases de relleno.
@@ -580,6 +626,23 @@ const TOOLS = [
       },
       required: ["prospects"]
     }
+  },
+  {
+    name: "set_reminder",
+    description: "Guarda un recordatorio. Úsalo cuando Marcos diga 'recuérdame', 'avísame', 'recuerda' seguido de fecha/hora y tarea. Parsea la fecha relativa a hoy al formato ISO 8601.",
+    input_schema: {
+      type: "object",
+      properties: {
+        datetime_iso: { type: "string", description: "Fecha y hora exacta en ISO 8601. Ej: '2025-05-06T09:00:00'. Calcula siempre la fecha absoluta a partir de hoy." },
+        text:         { type: "string", description: "Texto del recordatorio que se enviará a Marcos" }
+      },
+      required: ["datetime_iso", "text"]
+    }
+  },
+  {
+    name: "get_reminders",
+    description: "Lista los recordatorios pendientes de Marcos.",
+    input_schema: { type: "object", properties: {}, required: [] }
   }
 ];
 
@@ -1099,6 +1162,27 @@ async function runTool(name, input, userId) {
       const items = (input.prospects || []).filter(p => p.name);
       await saveProspectQueue(userId, { items, index: 0 });
       return `Cola guardada con ${items.length} prospectos. Índice actual: 0. Di "empieza" para analizar el primero.`;
+    }
+    case "set_reminder": {
+      if (!ALLOWED_USER_ID) return "ALLOWED_USER_ID no configurado, no se puede crear recordatorio.";
+      const remId = await setReminder({
+        userId:      ALLOWED_USER_ID,
+        chatId:      ALLOWED_USER_ID,
+        datetimeISO: input.datetime_iso,
+        text:        input.text
+      });
+      const d = new Date(input.datetime_iso);
+      const formatted = d.toLocaleString("es-ES", { timeZone: "Europe/Madrid", dateStyle: "full", timeStyle: "short" });
+      return `Recordatorio guardado (${remId}): "${input.text}" — ${formatted}`;
+    }
+    case "get_reminders": {
+      const reminders = await loadReminders();
+      const pending = reminders.filter(r => !r.done);
+      if (!pending.length) return "No hay recordatorios pendientes.";
+      return pending.map(r => {
+        const d = new Date(r.datetimeISO).toLocaleString("es-ES", { timeZone: "Europe/Madrid", dateStyle: "short", timeStyle: "short" });
+        return `• ${d}: ${r.text}`;
+      }).join("\n");
     }
     default:
       return "Herramienta no reconocida.";
@@ -1756,10 +1840,11 @@ bot.onText(/\/enviar/, async (msg) => {
         budget:      ""
       });
     }
-    await sendEmail({
+    const sentEmailId = await sendEmail({
       ...pending, pdfBuffer,
       pdfFilename: `propuesta-xora-${pending.business_name.toLowerCase().replace(/\s+/g, "-")}.pdf`
     });
+    if (sentEmailId) await storeEmailMapping(sentEmailId, pending.business_name, pending.to);
 
     await saveClient({ name: pending.business_name, email: pending.to, status: "contactado" });
     pendingEmails.delete(msg.from.id);
@@ -2316,7 +2401,8 @@ async function runAutoBuscar(userId, chatId) {
       if (!content?.subject || !content?.body) { skipped++; continue; }
 
       try {
-        await sendEmail({ to: email, subject: content.subject, body: content.body });
+        const autoEmailId = await sendEmail({ to: email, subject: content.subject, body: content.body });
+        if (autoEmailId) await storeEmailMapping(autoEmailId, prospect.name, email);
         await saveClient({ name: prospect.name, email, status: "contactado", sector: target.name, language: target.lang });
         sentThisRun.add(email.toLowerCase());
         sent++;
@@ -2357,4 +2443,198 @@ bot.onText(/\/buscar/, async (msg) => {
   });
 });
 
-console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | presupuestos ✓ | /buscar ✓`);
+// ── WEBHOOK SERVER (Resend tracking + inbound) ────────────
+
+async function handleResendEvent(payload) {
+  const type    = payload?.type;
+  const emailId = payload?.data?.email_id;
+  if (!emailId || !ALLOWED_USER_ID) return;
+
+  const map   = await loadEmailMap();
+  const entry = map[emailId];
+  if (!entry) return;
+
+  const clients = await loadClients();
+  const client  = Object.values(clients).find(c =>
+    c.email?.toLowerCase() === entry.to?.toLowerCase()
+  );
+
+  if (type === "email.opened") {
+    if (entry.openedAt) return;
+    entry.openedAt = new Date().toISOString();
+    map[emailId] = entry;
+    await saveEmailMap(map);
+
+    const minutesAgo = Math.round((Date.now() - new Date(entry.openedAt).getTime()) / 60000);
+    const timeStr = minutesAgo <= 1 ? "ahora mismo" : `hace ${minutesAgo} min`;
+    await bot.sendMessage(ALLOWED_USER_ID,
+      `👁️ *${entry.clientName}* abrió tu email ${timeStr}.\n📧 ${entry.to}`,
+      { parse_mode: "Markdown" }
+    );
+
+    if (client && client.status === "contactado") {
+      await updateClient({ name: client.name, notes: `Email abierto el ${new Date().toLocaleDateString("es-ES")}` });
+    }
+
+  } else if (type === "email.clicked") {
+    if (entry.clickedAt) return;
+    entry.clickedAt = new Date().toISOString();
+    map[emailId] = entry;
+    await saveEmailMap(map);
+
+    await bot.sendMessage(ALLOWED_USER_ID,
+      `🔗 *${entry.clientName}* hizo click en tu email.\n📧 ${entry.to}`,
+      { parse_mode: "Markdown" }
+    );
+  }
+}
+
+async function handleInboundEmail(payload) {
+  if (!ALLOWED_USER_ID) return;
+  const from    = payload?.from || "";
+  const subject = payload?.subject || "(sin asunto)";
+  const text    = (payload?.text || "").replace(/<[^>]*>/g, "").trim().slice(0, 800);
+
+  const fromEmail = from.match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/)?.[1] || from;
+  const fromName  = from.replace(/<.*>/, "").trim() || fromEmail;
+
+  const clients = await loadClients();
+  const client  = Object.values(clients).find(c =>
+    c.email?.toLowerCase() === fromEmail.toLowerCase()
+  );
+
+  let crmAction = "";
+  if (client && client.status === "contactado") {
+    await updateClient({
+      name:   client.name,
+      status: "interesado",
+      notes:  `Respondió el ${new Date().toLocaleDateString("es-ES")}: "${text.slice(0, 120)}"`
+    });
+    crmAction = `\n✅ CRM: *${client.name}* → *interesado*`;
+  } else if (!client) {
+    crmAction = "\n_Remitente no encontrado en CRM._";
+  }
+
+  await bot.sendMessage(ALLOWED_USER_ID,
+    `📩 *Email recibido*\n\n*De:* ${fromName} (${fromEmail})\n*Asunto:* ${subject}\n\n${text || "(sin texto)"}${crmAction}`,
+    { parse_mode: "Markdown" }
+  );
+}
+
+const webhookServer = http.createServer((req, res) => {
+  if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+
+  let body = "";
+  req.on("data", chunk => { body += chunk.toString(); });
+  req.on("end", async () => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+
+    try {
+      // Optional secret check via query param: /webhook/resend?secret=XXX
+      if (WEBHOOK_SECRET) {
+        const url = new URL(req.url, `http://localhost`);
+        if (url.searchParams.get("secret") !== WEBHOOK_SECRET) return;
+      }
+
+      const payload = JSON.parse(body);
+      if (req.url.startsWith("/webhook/resend/inbound")) {
+        await handleInboundEmail(payload);
+      } else if (req.url.startsWith("/webhook/resend")) {
+        await handleResendEvent(payload);
+      }
+    } catch (err) {
+      console.error("Webhook error:", err.message);
+    }
+  });
+});
+
+webhookServer.listen(WEBHOOK_PORT, () => {
+  console.log(`Webhook server en puerto ${WEBHOOK_PORT}`);
+});
+
+// ── CRON: RECORDATORIOS (cada minuto) ────────────────────
+
+cron.schedule("* * * * *", async () => {
+  try {
+    const reminders = await loadReminders();
+    if (!reminders.length) return;
+    const now = Date.now();
+    let changed = false;
+    for (const r of reminders) {
+      if (r.done) continue;
+      if (new Date(r.datetimeISO).getTime() <= now) {
+        await bot.sendMessage(r.chatId, `⏰ *Recordatorio:* ${r.text}`, { parse_mode: "Markdown" })
+          .catch(err => console.error("Error enviando recordatorio:", err.message));
+        r.done = true;
+        changed = true;
+      }
+    }
+    if (changed) await saveRemindersData(reminders);
+  } catch (err) {
+    console.error("Error cron recordatorios:", err.message);
+  }
+});
+
+// ── CRON: RESUMEN SEMANAL (lunes 9am Madrid) ─────────────
+
+cron.schedule("0 9 * * 1", async () => {
+  if (!ALLOWED_USER_ID) return;
+  try {
+    const clients  = await loadClients();
+    const prices   = await loadPrices();
+    const emailMap = await loadEmailMap();
+    const now      = Date.now();
+    const weekAgo  = now - 7 * 24 * 60 * 60 * 1000;
+    const list     = Object.values(clients);
+
+    const contactedThisWeek = list.filter(c =>
+      c.contacted_at && new Date(c.contacted_at).getTime() >= weekAgo
+    );
+    const respondedThisWeek = list.filter(c =>
+      c.updated_at && new Date(c.updated_at).getTime() >= weekAgo &&
+      ["interesado", "negociando", "cliente"].includes(c.status)
+    );
+    const newClients = list.filter(c =>
+      c.status === "cliente" && c.closed_at && new Date(c.closed_at).getTime() >= weekAgo
+    );
+    const openedThisWeek = Object.values(emailMap).filter(e =>
+      e.openedAt && new Date(e.openedAt).getTime() >= weekAgo
+    ).length;
+
+    const priceValues  = Object.values(prices).map(p => p.price);
+    const avgTicket    = Math.round(priceValues.reduce((s, p) => s + p, 0) / priceValues.length);
+    const pipelineList = list.filter(c => ["interesado", "negociando"].includes(c.status));
+    const pipelineValue = pipelineList.length * avgTicket;
+
+    const actions = [];
+    const pendingFU = list.filter(c =>
+      c.status === "contactado" && c.contacted_at &&
+      Math.floor((now - new Date(c.contacted_at)) / 86400000) >= 3
+    );
+    if (pendingFU.length) {
+      const names = pendingFU.slice(0, 2).map(c => c.name).join(", ");
+      actions.push(`Seguimiento a ${pendingFU.length} sin respuesta (+3 días): ${names}${pendingFU.length > 2 ? "..." : ""}`);
+    }
+    const negotiating = list.filter(c => c.status === "negociando");
+    if (negotiating.length) actions.push(`Cerrar ${negotiating.length} en negociación: ${negotiating.map(c => c.name).join(", ")}`);
+    if (contactedThisWeek.length < 5) actions.push("Lanzar campaña /buscar — menos de 5 contactados esta semana");
+    if (actions.length < 3) actions.push("Crear nuevas plantillas por sector con /plantillas");
+
+    await bot.sendMessage(ALLOWED_USER_ID,
+      `📊 *Resumen semanal XORA*\n\n` +
+      `📤 Contactados esta semana: *${contactedThisWeek.length}*\n` +
+      `💬 Respondieron: *${respondedThisWeek.length}*\n` +
+      `👁️ Abrieron el email: *${openedThisWeek}*\n` +
+      `✅ Clientes cerrados: *${newClients.length}*\n\n` +
+      `💰 Pipeline activo: *~${pipelineValue}€* (${pipelineList.length} oportunidades × ${avgTicket}€ ticket medio)\n\n` +
+      `🎯 *Próximas 3 acciones:*\n` +
+      actions.slice(0, 3).map((a, i) => `${i + 1}. ${a}`).join("\n"),
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error("Error resumen semanal:", err.message);
+  }
+}, { timezone: "Europe/Madrid" });
+
+console.log(`Bot XORA iniciado — voz ${openai ? "✓" : "(sin Whisper)"} | visión ✓ | PDF ✓ | CRM ✓ | precios ✓ | plantillas ✓ | presupuestos ✓ | /buscar ✓ | recordatorios ✓ | webhook ✓`);
