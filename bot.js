@@ -25,6 +25,7 @@ const AUTO_FOLLOWUP      = process.env.AUTO_FOLLOWUP === "true";
 const AUTO_FOLLOWUP_DAYS = parseInt(process.env.AUTO_FOLLOWUP_DAYS || "5");
 const WEBHOOK_PORT       = parseInt(process.env.WEBHOOK_PORT || process.env.PORT || "3000");
 const WEBHOOK_SECRET     = process.env.WEBHOOK_SECRET || "";
+const DASHBOARD_TOKEN    = process.env.DASHBOARD_TOKEN || "";
 
 if (!TELEGRAM_TOKEN || !ANTHROPIC_API_KEY) {
   console.error("Faltan TELEGRAM_TOKEN o ANTHROPIC_API_KEY");
@@ -2522,12 +2523,58 @@ async function handleInboundEmail(payload) {
 }
 
 const webhookServer = http.createServer((req, res) => {
+  const corsHeaders = {
+    "Access-Control-Allow-Origin":  "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  };
+
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, corsHeaders);
+    res.end();
+    return;
+  }
+
+  // ── GET /api/crm ────────────────────────────────────────
+  if (req.method === "GET" && req.url.startsWith("/api/crm")) {
+    (async () => {
+      try {
+        const url   = new URL(req.url, `http://localhost`);
+        const token = url.searchParams.get("token") ||
+                      (req.headers["authorization"] || "").replace("Bearer ", "");
+        if (DASHBOARD_TOKEN && token !== DASHBOARD_TOKEN) {
+          res.writeHead(401, { "Content-Type": "application/json", ...corsHeaders });
+          res.end(JSON.stringify({ error: "Unauthorized" }));
+          return;
+        }
+        const clients = await loadClients();
+        const prices  = await loadPrices();
+        const list    = Object.values(clients);
+        const byStatus = {
+          contactado: list.filter(c => c.status === "contactado").length,
+          interesado:  list.filter(c => c.status === "interesado").length,
+          negociando:  list.filter(c => c.status === "negociando").length,
+          cliente:     list.filter(c => c.status === "cliente").length,
+          descartado:  list.filter(c => c.status === "descartado").length,
+        };
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
+        res.end(JSON.stringify({ clients, prices, byStatus, total: list.length, updated_at: new Date().toISOString() }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json", ...corsHeaders });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    })();
+    return;
+  }
+
+  // ── POST /webhook/* ─────────────────────────────────────
   if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
 
   let body = "";
   req.on("data", chunk => { body += chunk.toString(); });
   req.on("end", async () => {
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
     res.end(JSON.stringify({ ok: true }));
 
     try {
