@@ -2568,22 +2568,53 @@ const webhookServer = http.createServer((req, res) => {
     return;
   }
 
-  // ── POST /webhook/* ─────────────────────────────────────
+  // ── POST /webhook/* + /api/client/* ────────────────────
   if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
 
   let body = "";
   req.on("data", chunk => { body += chunk.toString(); });
   req.on("end", async () => {
+
+    // ── POST /api/client/status  |  /api/client/note ──────
+    if (req.url.startsWith("/api/client")) {
+      try {
+        const url   = new URL(req.url, "http://localhost");
+        const token = url.searchParams.get("token") ||
+                      (req.headers["authorization"] || "").replace("Bearer ", "");
+        if (DASHBOARD_TOKEN && token !== DASHBOARD_TOKEN) {
+          res.writeHead(401, { "Content-Type": "application/json", ...corsHeaders });
+          res.end(JSON.stringify({ error: "Unauthorized" }));
+          return;
+        }
+        const payload = JSON.parse(body);
+        let result;
+        if (req.url.startsWith("/api/client/status")) {
+          result = await updateClient({ name: payload.name, status: payload.status });
+        } else if (req.url.startsWith("/api/client/note")) {
+          result = await updateClient({ name: payload.name, notes: payload.note });
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json", ...corsHeaders });
+          res.end(JSON.stringify({ error: "Not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, result }));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json", ...corsHeaders });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // ── POST /webhook/* ───────────────────────────────────
     res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
     res.end(JSON.stringify({ ok: true }));
 
     try {
-      // Optional secret check via query param: /webhook/resend?secret=XXX
       if (WEBHOOK_SECRET) {
         const url = new URL(req.url, `http://localhost`);
         if (url.searchParams.get("secret") !== WEBHOOK_SECRET) return;
       }
-
       const payload = JSON.parse(body);
       if (req.url.startsWith("/webhook/resend/inbound")) {
         await handleInboundEmail(payload);
